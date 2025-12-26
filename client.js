@@ -54,7 +54,7 @@ function createChart(container, options = {}) {
  * @returns {Promise<object[]>} A promise that resolves to the chart data.
  */
 async function fetchData(ticker, interval) {
-    const apiUrl = `http://localhost:3000/api/data?ticker=${ticker}&interval=${interval}`;
+    const apiUrl = `${window.location.protocol}//${window.location.host}/api/data?ticker=${ticker}&interval=${interval}`;
     try {
         const response = await fetch(apiUrl);
         if (!response.ok) {
