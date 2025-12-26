@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>リアルタイム株価チャート</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>リアルタイム株価チャート</h1>
+        <div id="controls">
+            <div class="input-group">
+                <label for="tickers-input">銘柄コード (例: 9166,7203)</label>
+                <input type="text" id="tickers-input" value="7203">
+            </div>
+            <div class="input-group">
+                <label for="interval-select">データ取得間隔</label>
+                <select id="interval-select">
+                    <option value="1m">1分</option>
+                    <option value="5m">5分</option>
+                    <option value="15m">15分</option>
+                    <option value="30m">30分</option>
+                    <option value="1h">1時間</option>
+                    <option value="1d" selected>日足</option>
+                </select>
+            </div>
+            <button id="start-button">表示開始</button>
+        </div>
+        <div id="status-message"></div>
+    </header>
+
+    <main id="charts-container">
+        <!-- Charts will be dynamically inserted here -->
+    </main>
+    
+    <script src="dist/bundle.js"></script>
+</body>
+</html>

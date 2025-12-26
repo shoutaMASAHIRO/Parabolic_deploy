@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  # Backend Node.js server
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    container_name: parabolic_server
+
+  # Frontend Nginx server
+  frontend:
+    image: nginx:1.21-alpine
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html
+      - ./style.css:/usr/share/nginx/html/style.css
+      - ./dist:/usr/share/nginx/html/dist
+    ports:
+      - "8080:80"
+    depends_on:
+      - server
+    restart: unless-stopped
+    container_name: parabolic_frontend
