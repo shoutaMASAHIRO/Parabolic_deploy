@@ -7,6 +7,9 @@ const port = 3000;
 
 app.use(cors());
 
+app.use(express.static('dist'));
+app.use(express.static(__dirname));
+
 // A simple caching mechanism
 const cache = {};
 const CACHE_TTL = 60 * 1000; // 60 seconds
