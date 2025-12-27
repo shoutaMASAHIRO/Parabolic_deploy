@@ -6868,6 +6868,89 @@
     }
   };
 
+  // node_modules/technicalindicators/lib/Utils/FixedSizeLinkedList.js
+  var FixedSizeLinkedList = class extends LinkedList {
+    constructor(size2, maintainHigh, maintainLow, maintainSum) {
+      super();
+      this.size = size2;
+      this.maintainHigh = maintainHigh;
+      this.maintainLow = maintainLow;
+      this.maintainSum = maintainSum;
+      this.totalPushed = 0;
+      this.periodHigh = 0;
+      this.periodLow = Infinity;
+      this.periodSum = 0;
+      if (!size2 || typeof size2 !== "number") {
+        throw "Size required and should be a number.";
+      }
+      this._push = this.push;
+      this.push = function(data) {
+        this.add(data);
+        this.totalPushed++;
+      };
+    }
+    add(data) {
+      if (this.length === this.size) {
+        this.lastShift = this.shift();
+        this._push(data);
+        if (this.maintainHigh) {
+          if (this.lastShift == this.periodHigh)
+            this.calculatePeriodHigh();
+        }
+        if (this.maintainLow) {
+          if (this.lastShift == this.periodLow)
+            this.calculatePeriodLow();
+        }
+        if (this.maintainSum) {
+          this.periodSum = this.periodSum - this.lastShift;
+        }
+      } else {
+        this._push(data);
+      }
+      if (this.maintainHigh) {
+        if (this.periodHigh <= data)
+          this.periodHigh = data;
+      }
+      if (this.maintainLow) {
+        if (this.periodLow >= data)
+          this.periodLow = data;
+      }
+      if (this.maintainSum) {
+        this.periodSum = this.periodSum + data;
+      }
+    }
+    *iterator() {
+      this.resetCursor();
+      while (this.next()) {
+        yield this.current;
+      }
+    }
+    calculatePeriodHigh() {
+      this.resetCursor();
+      if (this.next())
+        this.periodHigh = this.current;
+      while (this.next()) {
+        if (this.periodHigh <= this.current) {
+          this.periodHigh = this.current;
+        }
+        ;
+      }
+      ;
+    }
+    calculatePeriodLow() {
+      this.resetCursor();
+      if (this.next())
+        this.periodLow = this.current;
+      while (this.next()) {
+        if (this.periodLow >= this.current) {
+          this.periodLow = this.current;
+        }
+        ;
+      }
+      ;
+    }
+  };
+
   // node_modules/technicalindicators/lib/config.js
   var config = {};
   function getConfig(key) {
@@ -6957,155 +7040,157 @@
     return result;
   }
 
-  // node_modules/technicalindicators/lib/Utils/AverageGain.js
-  var AverageGain = class extends Indicator {
-    constructor(input) {
-      super(input);
-      let values = input.values;
-      let period = input.period;
-      let format2 = this.format;
-      this.generator = function* (period2) {
-        var currentValue = yield;
-        var counter = 1;
-        var gainSum = 0;
-        var avgGain;
-        var gain;
-        var lastValue = currentValue;
-        currentValue = yield;
-        while (true) {
-          gain = currentValue - lastValue;
-          gain = gain > 0 ? gain : 0;
-          if (gain > 0) {
-            gainSum = gainSum + gain;
-          }
-          if (counter < period2) {
-            counter++;
-          } else if (avgGain === void 0) {
-            avgGain = gainSum / period2;
-          } else {
-            avgGain = (avgGain * (period2 - 1) + gain) / period2;
-          }
-          lastValue = currentValue;
-          avgGain = avgGain !== void 0 ? format2(avgGain) : void 0;
-          currentValue = yield avgGain;
-        }
-      }(period);
-      this.generator.next();
-      this.result = [];
-      values.forEach((tick) => {
-        var result = this.generator.next(tick);
-        if (result.value !== void 0) {
-          this.result.push(result.value);
-        }
-      });
-    }
-    nextValue(price) {
-      return this.generator.next(price).value;
-    }
-  };
-  AverageGain.calculate = averagegain;
-  function averagegain(input) {
-    Indicator.reverseInputs(input);
-    var result = new AverageGain(input).result;
-    if (input.reversedInput) {
-      result.reverse();
-    }
-    Indicator.reverseInputs(input);
-    return result;
-  }
-
-  // node_modules/technicalindicators/lib/Utils/AverageLoss.js
-  var AverageLoss = class extends Indicator {
-    constructor(input) {
-      super(input);
-      let values = input.values;
-      let period = input.period;
-      let format2 = this.format;
-      this.generator = function* (period2) {
-        var currentValue = yield;
-        var counter = 1;
-        var lossSum = 0;
-        var avgLoss;
-        var loss;
-        var lastValue = currentValue;
-        currentValue = yield;
-        while (true) {
-          loss = lastValue - currentValue;
-          loss = loss > 0 ? loss : 0;
-          if (loss > 0) {
-            lossSum = lossSum + loss;
-          }
-          if (counter < period2) {
-            counter++;
-          } else if (avgLoss === void 0) {
-            avgLoss = lossSum / period2;
-          } else {
-            avgLoss = (avgLoss * (period2 - 1) + loss) / period2;
-          }
-          lastValue = currentValue;
-          avgLoss = avgLoss !== void 0 ? format2(avgLoss) : void 0;
-          currentValue = yield avgLoss;
-        }
-      }(period);
-      this.generator.next();
-      this.result = [];
-      values.forEach((tick) => {
-        var result = this.generator.next(tick);
-        if (result.value !== void 0) {
-          this.result.push(result.value);
-        }
-      });
-    }
-    nextValue(price) {
-      return this.generator.next(price).value;
-    }
-  };
-  AverageLoss.calculate = averageloss;
-  function averageloss(input) {
-    Indicator.reverseInputs(input);
-    var result = new AverageLoss(input).result;
-    if (input.reversedInput) {
-      result.reverse();
-    }
-    Indicator.reverseInputs(input);
-    return result;
-  }
-
-  // node_modules/technicalindicators/lib/oscillators/RSI.js
-  var RSI = class extends Indicator {
+  // node_modules/technicalindicators/lib/moving_averages/EMA.js
+  var EMA = class extends Indicator {
     constructor(input) {
       super(input);
       var period = input.period;
-      var values = input.values;
-      var GainProvider = new AverageGain({ period, values: [] });
-      var LossProvider = new AverageLoss({ period, values: [] });
-      let count = 1;
-      this.generator = function* (period2) {
-        var current = yield;
-        var lastAvgGain, lastAvgLoss, RS, currentRSI;
-        while (true) {
-          lastAvgGain = GainProvider.nextValue(current);
-          lastAvgLoss = LossProvider.nextValue(current);
-          if (lastAvgGain !== void 0 && lastAvgLoss !== void 0) {
-            if (lastAvgLoss === 0) {
-              currentRSI = 100;
-            } else if (lastAvgGain === 0) {
-              currentRSI = 0;
-            } else {
-              RS = lastAvgGain / lastAvgLoss;
-              RS = isNaN(RS) ? 0 : RS;
-              currentRSI = parseFloat((100 - 100 / (1 + RS)).toFixed(2));
-            }
-          }
-          count++;
-          current = yield currentRSI;
-        }
-      }(period);
-      this.generator.next();
+      var priceArray = input.values;
+      var exponent = 2 / (period + 1);
+      var sma2;
       this.result = [];
-      values.forEach((tick) => {
+      sma2 = new SMA({ period, values: [] });
+      var genFn = function* () {
+        var tick = yield;
+        var prevEma;
+        while (true) {
+          if (prevEma !== void 0 && tick !== void 0) {
+            prevEma = (tick - prevEma) * exponent + prevEma;
+            tick = yield prevEma;
+          } else {
+            tick = yield;
+            prevEma = sma2.nextValue(tick);
+            if (prevEma)
+              tick = yield prevEma;
+          }
+        }
+      };
+      this.generator = genFn();
+      this.generator.next();
+      this.generator.next();
+      priceArray.forEach((tick) => {
         var result = this.generator.next(tick);
-        if (result.value !== void 0) {
+        if (result.value != void 0) {
+          this.result.push(this.format(result.value));
+        }
+      });
+    }
+    nextValue(price) {
+      var result = this.generator.next(price).value;
+      if (result != void 0)
+        return this.format(result);
+    }
+  };
+  EMA.calculate = ema;
+  function ema(input) {
+    Indicator.reverseInputs(input);
+    var result = new EMA(input).result;
+    if (input.reversedInput) {
+      result.reverse();
+    }
+    Indicator.reverseInputs(input);
+    return result;
+  }
+
+  // node_modules/technicalindicators/lib/Utils/SD.js
+  var SD = class extends Indicator {
+    constructor(input) {
+      super(input);
+      var period = input.period;
+      var priceArray = input.values;
+      var sma2 = new SMA({ period, values: [], format: (v2) => {
+        return v2;
+      } });
+      this.result = [];
+      this.generator = function* () {
+        var tick;
+        var mean;
+        var currentSet = new FixedSizeLinkedList(period);
+        ;
+        tick = yield;
+        var sd2;
+        while (true) {
+          currentSet.push(tick);
+          mean = sma2.nextValue(tick);
+          if (mean) {
+            let sum = 0;
+            for (let x2 of currentSet.iterator()) {
+              sum = sum + Math.pow(x2 - mean, 2);
+            }
+            sd2 = Math.sqrt(sum / period);
+          }
+          tick = yield sd2;
+        }
+      }();
+      this.generator.next();
+      priceArray.forEach((tick) => {
+        var result = this.generator.next(tick);
+        if (result.value != void 0) {
+          this.result.push(this.format(result.value));
+        }
+      });
+    }
+    nextValue(price) {
+      var nextResult = this.generator.next(price);
+      if (nextResult.value != void 0)
+        return this.format(nextResult.value);
+    }
+  };
+  SD.calculate = sd;
+  function sd(input) {
+    Indicator.reverseInputs(input);
+    var result = new SD(input).result;
+    if (input.reversedInput) {
+      result.reverse();
+    }
+    Indicator.reverseInputs(input);
+    return result;
+  }
+
+  // node_modules/technicalindicators/lib/volatility/BollingerBands.js
+  var BollingerBands = class extends Indicator {
+    constructor(input) {
+      super(input);
+      var period = input.period;
+      var priceArray = input.values;
+      var stdDev = input.stdDev;
+      var format2 = this.format;
+      var sma2, sd2;
+      this.result = [];
+      sma2 = new SMA({ period, values: [], format: (v2) => {
+        return v2;
+      } });
+      sd2 = new SD({ period, values: [], format: (v2) => {
+        return v2;
+      } });
+      this.generator = function* () {
+        var result;
+        var tick;
+        var calcSMA;
+        var calcsd;
+        tick = yield;
+        while (true) {
+          calcSMA = sma2.nextValue(tick);
+          calcsd = sd2.nextValue(tick);
+          if (calcSMA) {
+            let middle = format2(calcSMA);
+            let upper = format2(calcSMA + calcsd * stdDev);
+            let lower = format2(calcSMA - calcsd * stdDev);
+            let pb = format2((tick - lower) / (upper - lower));
+            result = {
+              middle,
+              upper,
+              lower,
+              pb
+            };
+          }
+          tick = yield result;
+        }
+      }();
+      this.generator.next();
+      priceArray.forEach((tick) => {
+        var result = this.generator.next(tick);
+        if (result.value != void 0) {
           this.result.push(result.value);
         }
       });
@@ -7114,10 +7199,10 @@
       return this.generator.next(price).value;
     }
   };
-  RSI.calculate = rsi;
-  function rsi(input) {
+  BollingerBands.calculate = bollingerbands;
+  function bollingerbands(input) {
     Indicator.reverseInputs(input);
-    var result = new RSI(input).result;
+    var result = new BollingerBands(input).result;
     if (input.reversedInput) {
       result.reverse();
     }
@@ -7131,8 +7216,91 @@
   var startButton = document.getElementById("start-button");
   var chartsContainer = document.getElementById("charts-container");
   var statusMessage = document.getElementById("status-message");
+  var stockToggle = document.getElementById("stockToggle");
+  var usdJpyToggle = document.getElementById("usdJpyToggle");
+  var tickersInputGroup = tickersInput.closest(".input-group");
+  var toggleBbButton = document.getElementById("toggle-bb-button");
+  var toggleEmaButton = document.getElementById("toggle-ema-button");
   var chartObjects = [];
   var updateIntervalId = null;
+  var currentDataType = "stock";
+  var currentInterval = "1d";
+  var currentTickers = [];
+  var areBollingerBandsVisible = true;
+  var areEmaVisible = true;
+  async function refreshChartData() {
+    statusMessage.textContent = `\u66F4\u65B0\u4E2D: ${currentDataType === "stock" ? currentTickers.join(", ") : "USD/JPY"} (${currentInterval}) - \u30C7\u30FC\u30BF\u53D6\u5F97\u4E2D...`;
+    for (const chartObj of chartObjects) {
+      let data;
+      try {
+        if (currentDataType === "stock") {
+          data = await fetchStockData(chartObj.ticker, currentInterval);
+        } else {
+          data = await fetchUsdJpyData(chartObj.interval);
+        }
+        if (!data || data.length < 20) {
+          console.warn(`Not enough data to update indicators for ${chartObj.ticker}.`);
+          continue;
+        }
+        const closePrices = data.map((d2) => d2.close);
+        const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
+        const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+        const bb1 = BollingerBands.calculate(bbInput1);
+        const bb2 = BollingerBands.calculate(bbInput2);
+        const emaInput = { period: 20, values: closePrices };
+        const ema2 = EMA.calculate(emaInput);
+        const dataOffset = data.length - bb1.length;
+        const middleBandData = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.middle }));
+        const upperBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
+        const lowerBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
+        const upperBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
+        const lowerBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
+        const emaOffset = data.length - ema2.length;
+        const emaData = ema2.map((d2, i) => ({ time: data[i + emaOffset].time, value: d2 }));
+        chartObj.candleSeries.setData(data);
+        chartObj.middleBandSeries.setData(middleBandData);
+        chartObj.upperBand1Series.setData(upperBand1Data);
+        chartObj.lowerBand1Series.setData(lowerBand1Data);
+        chartObj.upperBand2Series.setData(upperBand2Data);
+        chartObj.lowerBand2Series.setData(lowerBand2Data);
+        if (chartObj.emaSeries) {
+          chartObj.emaSeries.setData(emaData);
+        }
+      } catch (error) {
+        console.error(`Failed to refresh data for ${chartObj.ticker}:`, error);
+        statusMessage.textContent = `\u30A8\u30E9\u30FC: ${chartObj.ticker} \u306E\u30C7\u30FC\u30BF\u66F4\u65B0\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002`;
+      }
+    }
+    statusMessage.textContent = `\u8868\u793A\u4E2D: ${currentDataType === "stock" ? currentTickers.join(", ") : "USD/JPY"} (${currentInterval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
+  }
+  var stockIntervalOptions = [
+    { value: "1m", text: "1\u5206" },
+    { value: "5m", text: "5\u5206" },
+    { value: "15m", text: "15\u5206" },
+    { value: "30m", text: "30\u5206" },
+    { value: "1h", text: "1\u6642\u9593" },
+    { value: "1d", text: "\u65E5\u8DB3" },
+    { value: "1wk", text: "1\u9031\u9593" }
+  ];
+  var usdJpyIntervalOptions = [
+    { value: "1m", text: "1\u5206" },
+    { value: "5m", text: "5\u5206" },
+    { value: "15m", text: "15\u5206" },
+    { value: "30m", text: "30\u5206" },
+    { value: "1h", text: "1\u6642\u9593" },
+    { value: "1d", text: "\u65E5\u8DB3" },
+    { value: "1wk", text: "1\u9031\u9593" }
+  ];
+  function updateIntervalOptions(options, defaultValue) {
+    intervalSelect.innerHTML = "";
+    options.forEach((option) => {
+      const opt = document.createElement("option");
+      opt.value = option.value;
+      opt.textContent = option.text;
+      intervalSelect.appendChild(opt);
+    });
+    intervalSelect.value = options.some((opt) => opt.value === defaultValue) ? defaultValue : options[0].value;
+  }
   var chartLayoutOptions = {
     layout: {
       background: { color: "#0a0a0a" },
@@ -7158,8 +7326,25 @@
     chartObjects.push({ container, chart });
     return chart;
   }
-  async function fetchData(ticker, interval) {
-    const apiUrl = `http://localhost:3000/api/data?ticker=${ticker}&interval=${interval}`;
+  function updateTickerInputVisibility() {
+    if (currentDataType === "usd_jpy") {
+      tickersInputGroup.style.display = "none";
+    } else {
+      tickersInputGroup.style.display = "flex";
+    }
+  }
+  function toggleBollingerBandsVisibility() {
+    areBollingerBandsVisible = !areBollingerBandsVisible;
+    toggleBbButton.textContent = areBollingerBandsVisible ? "BB\u975E\u8868\u793A" : "BB\u8868\u793A";
+    start(currentDataType);
+  }
+  function toggleEmaVisibility() {
+    areEmaVisible = !areEmaVisible;
+    toggleEmaButton.textContent = areEmaVisible ? "EMA\u975E\u8868\u793A" : "EMA\u8868\u793A";
+    start(currentDataType);
+  }
+  async function fetchStockData(ticker, interval) {
+    const apiUrl = `${window.location.protocol}//${window.location.host}/api/data?ticker=${ticker}&interval=${interval}`;
     try {
       const response = await fetch(apiUrl);
       if (!response.ok) {
@@ -7167,7 +7352,7 @@
         throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
       }
       const data = await response.json();
-      return data.filter((d2) => d2.date && d2.open && d2.high && d2.low && d2.close).map((d2) => ({
+      const formattedData = data.filter((d2) => d2.date && d2.open && d2.high && d2.low && d2.close).map((d2) => ({
         time: new Date(d2.date).getTime() / 1e3,
         // Convert to UNIX timestamp (seconds)
         open: d2.open,
@@ -7175,8 +7360,32 @@
         low: d2.low,
         close: d2.close
       })).sort((a2, b2) => a2.time - b2.time);
+      return formattedData;
     } catch (error) {
       console.error(`Failed to fetch data for ${ticker}:`, error);
+      throw error;
+    }
+  }
+  async function fetchUsdJpyData(interval) {
+    const apiUrl = `${window.location.protocol}//${window.location.host}/api/usd_jpy_data?interval=${interval}`;
+    try {
+      const response = await fetch(apiUrl);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      const formattedData = data.filter((d2) => d2.date && d2.open && d2.high && d2.low && d2.close).map((d2) => ({
+        time: new Date(d2.date).getTime() / 1e3,
+        // Convert to UNIX timestamp (seconds)
+        open: d2.open,
+        high: d2.high,
+        low: d2.low,
+        close: d2.close
+      })).sort((a2, b2) => a2.time - b2.time);
+      return formattedData;
+    } catch (error) {
+      console.error(`Failed to fetch USD/JPY data:`, error);
       throw error;
     }
   }
@@ -7187,13 +7396,11 @@
     wrapper.innerHTML = `
         <h2 class="chart-title">${ticker}</h2>
         <div class="chart-container" id="ohlc-${sanitizedTicker}"></div>
-        <div class="sub-chart-container" id="price-ma-${sanitizedTicker}"></div>
-        <div class="sub-chart-container" id="rsi-${sanitizedTicker}"></div>
     `;
     chartsContainer.appendChild(wrapper);
     let data;
     try {
-      data = await fetchData(ticker, interval);
+      data = await fetchStockData(ticker, interval);
       if (!data || data.length < 20) {
         throw new Error("Not enough data to calculate indicators.");
       }
@@ -7202,12 +7409,33 @@
       return;
     }
     const closePrices = data.map((d2) => d2.close);
-    const ma20 = SMA.calculate({ period: 20, values: closePrices });
-    const rsi14 = RSI.calculate({ period: 14, values: closePrices });
-    const priceAndMaData = data.slice(-ma20.length).map((d2, i) => ({ time: d2.time, value: ma20[i] }));
-    const rsiData = data.slice(-rsi14.length).map((d2, i) => ({ time: d2.time, value: rsi14[i] }));
-    const closePriceData = data.slice(-ma20.length).map((d2) => ({ time: d2.time, value: d2.close }));
+    const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
+    const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+    const bb1 = BollingerBands.calculate(bbInput1);
+    const bb2 = BollingerBands.calculate(bbInput2);
+    const emaInput = { period: 20, values: closePrices };
+    const ema2 = EMA.calculate(emaInput);
+    const dataOffset = data.length - bb1.length;
+    const middleBandData = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.middle }));
+    const upperBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
+    const lowerBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
+    const upperBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
+    const lowerBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
+    const emaOffset = data.length - ema2.length;
+    const emaData = ema2.map((d2, i) => ({ time: data[i + emaOffset].time, value: d2 }));
     const ohlcChart = createChart(wrapper.querySelector(`#ohlc-${sanitizedTicker}`));
+    const middleBandSeries = ohlcChart.addLineSeries({ color: "yellow", lineWidth: 1, title: "BB 0\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const upperBand1Series = ohlcChart.addLineSeries({ color: "green", lineWidth: 1, title: "BB +1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const lowerBand1Series = ohlcChart.addLineSeries({ color: "green", lineWidth: 1, title: "BB -1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const upperBand2Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 1, title: "BB +2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const lowerBand2Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 1, title: "BB -2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    middleBandSeries.setData(middleBandData);
+    upperBand1Series.setData(upperBand1Data);
+    lowerBand1Series.setData(lowerBand1Data);
+    upperBand2Series.setData(upperBand2Data);
+    lowerBand2Series.setData(lowerBand2Data);
+    const emaSeries = ohlcChart.addLineSeries({ color: "orange", lineWidth: 1, title: "EMA 20", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areEmaVisible });
+    emaSeries.setData(emaData);
     const candleSeries = ohlcChart.addCandlestickSeries({
       upColor: "#ff4c4c",
       downColor: "#4c6aff",
@@ -7216,74 +7444,190 @@
       wickDownColor: "#4c6aff"
     });
     candleSeries.setData(data);
-    const priceMaChart = createChart(wrapper.querySelector(`#price-ma-${sanitizedTicker}`));
-    const priceSeries = priceMaChart.addLineSeries({ color: "white", lineWidth: 2, title: "Close" });
-    const maSeries = priceMaChart.addLineSeries({ color: "orange", lineWidth: 2, title: "MA20" });
-    priceSeries.setData(closePriceData);
-    maSeries.setData(priceAndMaData);
-    priceMaChart.timeScale().setVisible(false);
-    const rsiChart = createChart(wrapper.querySelector(`#rsi-${sanitizedTicker}`), {
-      priceScale: {
-        autoScale: false,
-        // Disable auto scale for fixed 0-100 range
-        scaleMargins: { top: 0.1, bottom: 0.1 }
-      }
-    });
-    rsiChart.priceScale().applyOptions({
-      minimum: 0,
-      maximum: 100
-    });
-    const rsiSeries = rsiChart.addLineSeries({ color: "#8A2BE2", lineWidth: 1, title: "RSI(14)" });
-    rsiSeries.setData(rsiData);
-    rsiSeries.createPriceLine({ price: 70, color: "orange", lineWidth: 1, lineStyle: d.Dashed, axisLabelVisible: true, title: "70" });
-    rsiSeries.createPriceLine({ price: 30, color: "green", lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "30" });
-    const rsiDiffMarkers = [];
-    for (let i = 1; i < rsiData.length; i++) {
-      const diff = rsiData[i].value - rsiData[i - 1].value;
-      if (diff >= 10) {
-        rsiDiffMarkers.push({ time: rsiData[i].time, position: "belowBar", color: "red", shape: "arrowUp", text: "\u25B2" });
-      } else if (diff <= -10) {
-        rsiDiffMarkers.push({ time: rsiData[i].time, position: "aboveBar", color: "blue", shape: "arrowDown", text: "\u25BC" });
-      }
-    }
-    rsiSeries.setMarkers(rsiDiffMarkers);
-    rsiChart.timeScale().setVisible(false);
-    ohlcChart.timeScale().subscribeVisibleTimeRangeChange((timeRange) => {
-      priceMaChart.timeScale().setVisibleTimeRange(timeRange);
-      rsiChart.timeScale().setVisibleTimeRange(timeRange);
-    });
-    priceMaChart.timeScale().subscribeVisibleTimeRangeChange((timeRange) => {
-      ohlcChart.timeScale().setVisibleTimeRange(timeRange);
-      rsiChart.timeScale().setVisibleTimeRange(timeRange);
-    });
-    rsiChart.timeScale().subscribeVisibleTimeRangeChange((timeRange) => {
-      ohlcChart.timeScale().setVisibleTimeRange(timeRange);
-      priceMaChart.timeScale().setVisibleTimeRange(timeRange);
-    });
+    return {
+      chart: ohlcChart,
+      container: wrapper.querySelector(`#ohlc-${sanitizedTicker}`),
+      candleSeries,
+      middleBandSeries,
+      upperBand1Series,
+      lowerBand1Series,
+      upperBand2Series,
+      lowerBand2Series,
+      emaSeries,
+      // Store EMA series
+      ticker,
+      // Store ticker for easy access during updates
+      interval
+      // Store interval for easy access during updates
+    };
   }
-  async function start() {
+  async function renderChartsForStocks(tickers, interval) {
+    const renderedCharts = await Promise.all(
+      tickers.map((ticker) => renderChartForTicker(ticker, interval))
+    );
+    chartObjects.push(...renderedCharts);
+  }
+  async function renderChartForUsdJpy(interval) {
+    const defaultInterval = "1d";
+    let currentInterval2 = interval;
+    let dataFetchAttempted = 0;
+    while (dataFetchAttempted < 2) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "chart-wrapper";
+      wrapper.innerHTML = `
+            <h2 class="chart-title">USD/JPY</h2>
+            <div class="chart-container" id="usd-jpy-chart"></div>
+        `;
+      chartsContainer.appendChild(wrapper);
+      let data;
+      let errorMessage = "";
+      try {
+        data = await fetchUsdJpyData(currentInterval2);
+        if (!data || data.length < 20) {
+          throw new Error(`Not enough data to calculate indicators for USD/JPY with interval ${currentInterval2}.`);
+        }
+      } catch (error) {
+        errorMessage = `Error loading USD/JPY data for interval '${currentInterval2}': ${error.message}`;
+        if (error.message.includes("not supported by Yahoo Finance for currency pairs")) {
+          errorMessage = `\u30A8\u30E9\u30FC: \u30C9\u30EB\u5186\u306E '${currentInterval2}' \u30A4\u30F3\u30BF\u30FC\u30D0\u30EB\u306FYahoo Finance\u3067\u30B5\u30DD\u30FC\u30C8\u3055\u308C\u3066\u3044\u306A\u3044\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\u3002`;
+        } else if (error.message.includes("Not enough data")) {
+          errorMessage = `\u30A8\u30E9\u30FC: \u30C9\u30EB\u5186\u306E '${currentInterval2}' \u30A4\u30F3\u30BF\u30FC\u30D0\u30EB\u3067\u5341\u5206\u306A\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u305B\u3093\u3002`;
+        }
+        console.error(errorMessage);
+        if (currentInterval2 !== defaultInterval && dataFetchAttempted === 0) {
+          wrapper.querySelector(`#usd-jpy-chart`).innerText = `${errorMessage} \u65E5\u8DB3\u3067\u518D\u8A66\u884C\u3057\u307E\u3059...`;
+          currentInterval2 = defaultInterval;
+          dataFetchAttempted++;
+          chartsContainer.innerHTML = "";
+          continue;
+        } else {
+          wrapper.querySelector(`#usd-jpy-chart`).innerText = `${errorMessage} \u65E5\u8DB3\u30C7\u30FC\u30BF\u3082\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002`;
+          return;
+        }
+      }
+      if (data && data.length > 0) {
+        if (interval !== currentInterval2) {
+          statusMessage.textContent = `\u6CE8\u610F: \u30C9\u30EB\u5186\u306E '${interval}' \u30A4\u30F3\u30BF\u30FC\u30D0\u30EB\u306F\u30B5\u30DD\u30FC\u30C8\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002\u65E5\u8DB3\u30C7\u30FC\u30BF\u304C\u8868\u793A\u3055\u308C\u3066\u3044\u307E\u3059\u3002`;
+        } else {
+          statusMessage.textContent = `\u8868\u793A\u4E2D: USD/JPY (${currentInterval2}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
+        }
+        const closePrices = data.map((d2) => d2.close);
+        const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
+        const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+        const bb1 = BollingerBands.calculate(bbInput1);
+        const bb2 = BollingerBands.calculate(bbInput2);
+        const emaInput = { period: 20, values: closePrices };
+        const ema2 = EMA.calculate(emaInput);
+        const dataOffset = data.length - bb1.length;
+        const middleBandData = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.middle }));
+        const upperBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
+        const lowerBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
+        const upperBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
+        const lowerBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
+        const emaOffset = data.length - ema2.length;
+        const emaData = ema2.map((d2, i) => ({ time: data[i + emaOffset].time, value: d2 }));
+        const usdJpyChart = createChart(wrapper.querySelector(`#usd-jpy-chart`));
+        const middleBandSeries = usdJpyChart.addLineSeries({ color: "yellow", lineWidth: 1, title: "BB 0\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        const upperBand1Series = usdJpyChart.addLineSeries({ color: "green", lineWidth: 1, title: "BB +1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        const lowerBand1Series = usdJpyChart.addLineSeries({ color: "green", lineWidth: 1, title: "BB -1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        const upperBand2Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 1, title: "BB +2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        const lowerBand2Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 1, title: "BB -2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        middleBandSeries.setData(middleBandData);
+        upperBand1Series.setData(upperBand1Data);
+        lowerBand1Series.setData(lowerBand1Data);
+        upperBand2Series.setData(upperBand2Data);
+        lowerBand2Series.setData(lowerBand2Data);
+        const emaSeries = usdJpyChart.addLineSeries({ color: "orange", lineWidth: 1, title: "EMA 20", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areEmaVisible });
+        emaSeries.setData(emaData);
+        const candleSeries = usdJpyChart.addCandlestickSeries({
+          upColor: "#ff4c4c",
+          downColor: "#4c6aff",
+          borderVisible: false,
+          wickUpColor: "#ff4c4c",
+          wickDownColor: "#4c6aff"
+        });
+        candleSeries.setData(data);
+        usdJpyChart.timeScale().fitContent();
+        return {
+          chart: usdJpyChart,
+          container: wrapper.querySelector(`#usd-jpy-chart`),
+          candleSeries,
+          middleBandSeries,
+          upperBand1Series,
+          lowerBand1Series,
+          upperBand2Series,
+          lowerBand2Series,
+          emaSeries,
+          // Store EMA series
+          ticker: "USDJPY=X",
+          // Store ticker for easy access during updates
+          interval: currentInterval2
+          // Store currentInterval as the actual interval used
+        };
+      }
+      dataFetchAttempted++;
+    }
+    return null;
+  }
+  async function start(dataType) {
     if (updateIntervalId) {
       clearInterval(updateIntervalId);
     }
     chartsContainer.innerHTML = "";
     chartObjects = [];
     statusMessage.textContent = "\u30C1\u30E3\u30FC\u30C8\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059...";
-    const tickers = tickersInput.value.split(",").map((t) => t.trim()).filter((t) => t);
-    const interval = intervalSelect.value;
-    const formattedTickers = tickers.map((c2) => c2.endsWith(".T") ? c2 : `${c2}.T`);
-    await Promise.all(
-      formattedTickers.map((ticker) => renderChartForTicker(ticker, interval))
-    );
-    statusMessage.textContent = `\u8868\u793A\u4E2D: ${formattedTickers.join(", ")} (${interval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
-    updateIntervalId = setInterval(start, 60 * 1e3);
+    currentDataType = dataType;
+    if (dataType === "stock") {
+      currentTickers = tickersInput.value.split(",").map((t) => t.trim()).filter((t) => t);
+      currentInterval = intervalSelect.value;
+      const formattedTickers = currentTickers.map((c2) => c2.endsWith(".T") ? c2 : `${c2}.T`);
+      await renderChartsForStocks(formattedTickers, currentInterval);
+      statusMessage.textContent = `\u8868\u793A\u4E2D: ${formattedTickers.join(", ")} (${currentInterval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
+      updateIntervalId = setInterval(refreshChartData, 60 * 1e3);
+    } else if (dataType === "usd_jpy") {
+      currentTickers = ["USDJPY=X"];
+      currentInterval = intervalSelect.value;
+      const usdJpyChartObj = await renderChartForUsdJpy(currentInterval);
+      if (usdJpyChartObj) {
+        chartObjects.push(usdJpyChartObj);
+      }
+      statusMessage.textContent = `\u8868\u793A\u4E2D: USD/JPY (${currentInterval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
+      updateIntervalId = setInterval(refreshChartData, 60 * 1e3);
+    }
   }
   window.addEventListener("resize", () => {
     chartObjects.forEach(({ container, chart }) => {
       chart.resize(container.clientWidth, container.clientHeight);
     });
   });
-  startButton.addEventListener("click", start);
-  start();
+  startButton.addEventListener("click", () => start(currentDataType));
+  toggleBbButton.addEventListener("click", toggleBollingerBandsVisibility);
+  toggleEmaButton.addEventListener("click", toggleEmaVisibility);
+  stockToggle.addEventListener("click", () => {
+    currentDataType = "stock";
+    stockToggle.classList.add("active");
+    usdJpyToggle.classList.remove("active");
+    updateIntervalOptions(stockIntervalOptions, "1d");
+    updateTickerInputVisibility();
+    start(currentDataType);
+  });
+  usdJpyToggle.addEventListener("click", () => {
+    currentDataType = "usd_jpy";
+    usdJpyToggle.classList.add("active");
+    stockToggle.classList.remove("active");
+    updateIntervalOptions(usdJpyIntervalOptions, "1d");
+    updateTickerInputVisibility();
+    start(currentDataType);
+  });
+  if (currentDataType === "stock") {
+    stockToggle.classList.add("active");
+    updateIntervalOptions(stockIntervalOptions, "1d");
+  } else {
+    usdJpyToggle.classList.add("active");
+    updateIntervalOptions(usdJpyIntervalOptions, "1d");
+  }
+  updateTickerInputVisibility();
+  start(currentDataType);
 })();
 /*! Bundled license information:
 

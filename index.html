@@ -3,12 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>リアルタイム株価チャート</title>
+    <title></title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <div class="toggle-container">
+        <button id="stockToggle" class="active">株価</button>
+        <button id="usdJpyToggle">ドル円</button>
+    </div>
     <header>
-        <h1>リアルタイム株価チャート</h1>
+        <h1></h1>
         <div id="controls">
             <div class="input-group">
                 <label for="tickers-input">銘柄コード (例: 9166,7203)</label>
@@ -26,6 +30,8 @@
                 </select>
             </div>
             <button id="start-button">表示開始</button>
+            <button id="toggle-bb-button">BB表示/非表示</button>
+            <button id="toggle-ema-button">EMA表示/非表示</button>
         </div>
         <div id="status-message"></div>
     </header>

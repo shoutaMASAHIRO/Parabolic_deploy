@@ -1,5 +1,5 @@
 import { createChart as createLightweightChart, LineStyle } from 'lightweight-charts';
-import { SMA, RSI } from 'technicalindicators';
+import { BollingerBands, SMA, EMA } from 'technicalindicators';
 
 
 // --- DOM Elements ---
@@ -8,10 +8,129 @@ const intervalSelect = document.getElementById('interval-select');
 const startButton = document.getElementById('start-button');
 const chartsContainer = document.getElementById('charts-container');
 const statusMessage = document.getElementById('status-message');
+const stockToggle = document.getElementById('stockToggle');
+const usdJpyToggle = document.getElementById('usdJpyToggle');
+const tickersInputGroup = tickersInput.closest('.input-group');
+const toggleBbButton = document.getElementById('toggle-bb-button');
+const toggleEmaButton = document.getElementById('toggle-ema-button');
 
 // --- Global State ---
-let chartObjects = []; // To hold all chart instances for resizing
+let chartObjects = []; // To hold all chart instances and their series for updates
 let updateIntervalId = null;
+let currentDataType = 'stock'; // 'stock' or 'usd_jpy'
+let currentInterval = '1d'; // Store the currently selected interval
+let currentTickers = []; // Store the currently selected tickers
+let areBollingerBandsVisible = true; // Initial state: Bollinger Bands are visible
+let areEmaVisible = true; // Initial state: EMA is visible
+
+/**
+ * Refreshes data for all active charts and updates their series.
+ */
+async function refreshChartData() {
+    statusMessage.textContent = `更新中: ${currentDataType === 'stock' ? currentTickers.join(', ') : 'USD/JPY'} (${currentInterval}) - データ取得中...`;
+
+    for (const chartObj of chartObjects) {
+        let data;
+        try {
+            if (currentDataType === 'stock') {
+                data = await fetchStockData(chartObj.ticker, currentInterval);
+            } else { // usd_jpy
+                // Use chartObj.interval to get the actual interval that data was successfully fetched with,
+                // accounting for any fallback to '1d' in renderChartForUsdJpy.
+                data = await fetchUsdJpyData(chartObj.interval);
+            }
+
+            if (!data || data.length < 20) {
+                console.warn(`Not enough data to update indicators for ${chartObj.ticker}.`);
+                continue; // Skip this chart if data is insufficient
+            }
+
+            const closePrices = data.map(d => d.close);
+
+            // Recalculate Bollinger Bands
+            const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
+            const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+
+            const bb1 = BollingerBands.calculate(bbInput1);
+            const bb2 = BollingerBands.calculate(bbInput2);
+
+            // Recalculate EMA
+            const emaInput = { period: 20, values: closePrices };
+            const ema = EMA.calculate(emaInput);
+
+            // Align indicator data with main chart data
+            const dataOffset = data.length - bb1.length;
+            const middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
+            const upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+            const lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+            const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+            const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+
+            const emaOffset = data.length - ema.length;
+            const emaData = ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
+
+            // Update series data
+            chartObj.candleSeries.setData(data);
+            chartObj.middleBandSeries.setData(middleBandData);
+            chartObj.upperBand1Series.setData(upperBand1Data);
+            chartObj.lowerBand1Series.setData(lowerBand1Data);
+            chartObj.upperBand2Series.setData(upperBand2Data);
+            chartObj.lowerBand2Series.setData(lowerBand2Data);
+            if (chartObj.emaSeries) { // Check if EMA series exists for this chart
+                chartObj.emaSeries.setData(emaData);
+            }
+            
+            // Do NOT call fitContent() here, as it would reset user's zoom/pan
+            // chartObj.chart.timeScale().fitContent();
+
+        } catch (error) {
+            console.error(`Failed to refresh data for ${chartObj.ticker}:`, error);
+            statusMessage.textContent = `エラー: ${chartObj.ticker} のデータ更新に失敗しました。`;
+        }
+    }
+    statusMessage.textContent = `表示中: ${currentDataType === 'stock' ? currentTickers.join(', ') : 'USD/JPY'} (${currentInterval}) - 60秒ごとに更新`;
+}
+
+// --- Interval Options ---
+const stockIntervalOptions = [
+    { value: '1m', text: '1分' },
+    { value: '5m', text: '5分' },
+    { value: '15m', text: '15分' },
+    { value: '30m', text: '30分' },
+    { value: '1h', text: '1時間' },
+    { value: '1d', text: '日足' },
+    { value: '1wk', text: '1週間' },
+];
+
+// Note: For USD/JPY, intraday intervals might not be reliably available from Yahoo Finance.
+// We'll restrict to generally available intervals to avoid "Invalid interval" errors.
+const usdJpyIntervalOptions = [
+    { value: '1m', text: '1分' },
+    { value: '5m', text: '5分' },
+    { value: '15m', text: '15分' },
+    { value: '30m', text: '30分' },
+    { value: '1h', text: '1時間' },
+    { value: '1d', text: '日足' },
+    { value: '1wk', text: '1週間' },
+];
+
+/**
+ * Updates the intervalSelect dropdown with new options.
+ * @param {Array<Object>} options - An array of { value: string, text: string } objects.
+ * @param {string} defaultValue - The default value to set for the select.
+ */
+function updateIntervalOptions(options, defaultValue) {
+    intervalSelect.innerHTML = ''; // Clear existing options
+    options.forEach(option => {
+        const opt = document.createElement('option');
+        opt.value = option.value;
+        opt.textContent = option.text;
+        intervalSelect.appendChild(opt);
+    });
+    // Set the default value, ensuring it's one of the available options
+    intervalSelect.value = options.some(opt => opt.value === defaultValue) ? defaultValue : options[0].value;
+}
+
 
 // --- Charting Configuration ---
 const chartLayoutOptions = {
@@ -48,12 +167,49 @@ function createChart(container, options = {}) {
 }
 
 /**
- * Fetches data from the local proxy server.
+ * Updates the visibility of the ticker input based on the current data type.
+ */
+function updateTickerInputVisibility() {
+    if (currentDataType === 'usd_jpy') {
+        tickersInputGroup.style.display = 'none';
+    } else {
+        tickersInputGroup.style.display = 'flex';
+    }
+}
+
+/**
+ * Toggles the visibility of Bollinger Bands on all active charts.
+ */
+function toggleBollingerBandsVisibility() {
+    areBollingerBandsVisible = !areBollingerBandsVisible; // Toggle the state
+
+    // Update button text
+    toggleBbButton.textContent = areBollingerBandsVisible ? 'BB非表示' : 'BB表示';
+
+    // Call start to re-render charts with new BB visibility state
+    start(currentDataType);
+}
+
+/**
+ * Toggles the visibility of EMA on all active charts.
+ */
+function toggleEmaVisibility() {
+    areEmaVisible = !areEmaVisible; // Toggle the state
+
+    // Update button text
+    toggleEmaButton.textContent = areEmaVisible ? 'EMA非表示' : 'EMA表示';
+
+    // Call start to re-render charts with new EMA visibility state
+    start(currentDataType);
+}
+
+/**
+ * Fetches data from the local proxy server for stocks.
  * @param {string} ticker The stock ticker symbol.
  * @param {string} interval The data interval.
  * @returns {Promise<object[]>} A promise that resolves to the chart data.
  */
-async function fetchData(ticker, interval) {
+async function fetchStockData(ticker, interval) {
     const apiUrl = `${window.location.protocol}//${window.location.host}/api/data?ticker=${ticker}&interval=${interval}`;
     try {
         const response = await fetch(apiUrl);
@@ -62,8 +218,7 @@ async function fetchData(ticker, interval) {
             throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
         }
         const data = await response.json();
-        // Format for Lightweight Charts: { time, open, high, low, close }
-        return data
+        const formattedData = data
             .filter(d => d.date && d.open && d.high && d.low && d.close) // Ensure data is valid
             .map(d => ({
                 time: (new Date(d.date).getTime() / 1000), // Convert to UNIX timestamp (seconds)
@@ -73,8 +228,42 @@ async function fetchData(ticker, interval) {
                 close: d.close,
             }))
             .sort((a, b) => a.time - b.time); // Sort chronologically
+        
+        return formattedData;
     } catch (error) {
         console.error(`Failed to fetch data for ${ticker}:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Fetches data from the local proxy server for USD/JPY.
+ * @param {string} interval The data interval.
+ * @returns {Promise<object[]>} A promise that resolves to the chart data.
+ */
+async function fetchUsdJpyData(interval) {
+    const apiUrl = `${window.location.protocol}//${window.location.host}/api/usd_jpy_data?interval=${interval}`;
+    try {
+        const response = await fetch(apiUrl);
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        const formattedData = data
+            .filter(d => d.date && d.open && d.high && d.low && d.close) // Ensure data is valid
+            .map(d => ({
+                time: (new Date(d.date).getTime() / 1000), // Convert to UNIX timestamp (seconds)
+                open: d.open,
+                high: d.high,
+                low: d.low,
+                close: d.close,
+            }))
+            .sort((a, b) => a.time - b.time); // Sort chronologically
+        
+        return formattedData;
+    } catch (error) {
+        console.error(`Failed to fetch USD/JPY data:`, error);
         throw error;
     }
 }
@@ -94,15 +283,14 @@ async function renderChartForTicker(ticker, interval) {
     wrapper.innerHTML = `
         <h2 class="chart-title">${ticker}</h2>
         <div class="chart-container" id="ohlc-${sanitizedTicker}"></div>
-        <div class="sub-chart-container" id="price-ma-${sanitizedTicker}"></div>
-        <div class="sub-chart-container" id="rsi-${sanitizedTicker}"></div>
     `;
     chartsContainer.appendChild(wrapper);
 
     // 2. Fetch data
     let data;
     try {
-        data = await fetchData(ticker, interval);
+        data = await fetchStockData(ticker, interval);
+        // Bollinger Bands require a certain amount of data to be calculated
         if (!data || data.length < 20) {
             throw new Error("Not enough data to calculate indicators.");
         }
@@ -113,19 +301,49 @@ async function renderChartForTicker(ticker, interval) {
 
     const closePrices = data.map(d => d.close);
 
-    // 3. Calculate Indicators
-    const ma20 = SMA.calculate({ period: 20, values: closePrices });
-    const rsi14 = RSI.calculate({ period: 14, values: closePrices });
-    
+    // 3. Calculate Bollinger Bands
+    const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
+    const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+
+    const bb1 = BollingerBands.calculate(bbInput1);
+    const bb2 = BollingerBands.calculate(bbInput2);
+
+    // 3.5. Calculate EMA
+    const emaInput = { period: 20, values: closePrices };
+    const ema = EMA.calculate(emaInput);
+
     // Align indicator data with main chart data
-    const priceAndMaData = data.slice(-ma20.length).map((d, i) => ({ time: d.time, value: ma20[i] }));
-    const rsiData = data.slice(-rsi14.length).map((d, i) => ({ time: d.time, value: rsi14[i] }));
-    const closePriceData = data.slice(-ma20.length).map((d) => ({time: d.time, value: d.close}));
+    const dataOffset = data.length - bb1.length;
+    const middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
+    const upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+    const lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+    const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+    const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+
+    const emaOffset = data.length - ema.length;
+    const emaData = ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
 
     // 4. Create and configure charts
-    
-    // Candlestick Chart
     const ohlcChart = createChart(wrapper.querySelector(`#ohlc-${sanitizedTicker}`));
+    
+    // Add Bollinger Band series FIRST so they are in the background
+    const middleBandSeries = ohlcChart.addLineSeries({ color: 'yellow', lineWidth: 1, title: 'BB 0σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const upperBand1Series = ohlcChart.addLineSeries({ color: 'green', lineWidth: 1, title: 'BB +1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const lowerBand1Series = ohlcChart.addLineSeries({ color: 'green', lineWidth: 1, title: 'BB -1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const upperBand2Series = ohlcChart.addLineSeries({ color: 'purple', lineWidth: 1, title: 'BB +2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const lowerBand2Series = ohlcChart.addLineSeries({ color: 'purple', lineWidth: 1, title: 'BB -2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    
+    middleBandSeries.setData(middleBandData);
+    upperBand1Series.setData(upperBand1Data);
+    lowerBand1Series.setData(lowerBand1Data);
+    upperBand2Series.setData(upperBand2Data);
+    lowerBand2Series.setData(lowerBand2Data);
+
+    // Add EMA series
+    const emaSeries = ohlcChart.addLineSeries({ color: 'orange', lineWidth: 1, title: 'EMA 20', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areEmaVisible });
+    emaSeries.setData(emaData);
+
+    // Add Candlestick series last so it's in the foreground
     const candleSeries = ohlcChart.addCandlestickSeries({
         upColor: '#ff4c4c',
         downColor: '#4c6aff',
@@ -135,89 +353,207 @@ async function renderChartForTicker(ticker, interval) {
     });
     candleSeries.setData(data);
 
-    // Price + MA20 Chart
-    const priceMaChart = createChart(wrapper.querySelector(`#price-ma-${sanitizedTicker}`));
-    const priceSeries = priceMaChart.addLineSeries({ color: 'white', lineWidth: 2, title: 'Close' });
-    const maSeries = priceMaChart.addLineSeries({ color: 'orange', lineWidth: 2, title: 'MA20' });
-    priceSeries.setData(closePriceData);
-    maSeries.setData(priceAndMaData);
-    priceMaChart.timeScale().setVisible(false); // Hide time scale for sub-charts
+    return {
+        chart: ohlcChart,
+        container: wrapper.querySelector(`#ohlc-${sanitizedTicker}`),
+        candleSeries,
+        middleBandSeries,
+        upperBand1Series,
+        lowerBand1Series,
+        upperBand2Series,
+        lowerBand2Series,
+        emaSeries, // Store EMA series
+        ticker, // Store ticker for easy access during updates
+        interval, // Store interval for easy access during updates
+    };
+}
 
-    // RSI Chart
-    const rsiChart = createChart(wrapper.querySelector(`#rsi-${sanitizedTicker}`), {
-        priceScale: {
-            autoScale: false, // Disable auto scale for fixed 0-100 range
-            scaleMargins: { top: 0.1, bottom: 0.1 },
+/**
+ * Renders charts for stock data.
+ * @param {string[]} tickers Array of stock ticker symbols.
+ * @param {string} interval The data interval.
+ */
+async function renderChartsForStocks(tickers, interval) {
+    const renderedCharts = await Promise.all(
+        tickers.map(ticker => renderChartForTicker(ticker, interval))
+    );
+    chartObjects.push(...renderedCharts);
+}
+
+/**
+ * Renders the chart for USD/JPY data.
+ * @param {string} interval The data interval.
+ */
+async function renderChartForUsdJpy(interval) {
+    const defaultInterval = '1d';
+    let currentInterval = interval;
+    let dataFetchAttempted = 0; // Track attempts to prevent infinite loops
+
+    while (dataFetchAttempted < 2) { // Allow one retry with default interval
+        // 1. Create container for USD/JPY chart
+        const wrapper = document.createElement('div');
+        wrapper.className = 'chart-wrapper';
+        wrapper.innerHTML = `
+            <h2 class="chart-title">USD/JPY</h2>
+            <div class="chart-container" id="usd-jpy-chart"></div>
+        `;
+        chartsContainer.appendChild(wrapper);
+
+        // 2. Fetch data
+        let data;
+        let errorMessage = '';
+        try {
+            data = await fetchUsdJpyData(currentInterval);
+            // Bollinger Bands require a certain amount of data to be calculated
+            if (!data || data.length < 20) {
+                throw new Error(`Not enough data to calculate indicators for USD/JPY with interval ${currentInterval}.`);
+            }
+        } catch (error) {
+            errorMessage = `Error loading USD/JPY data for interval '${currentInterval}': ${error.message}`;
+            if (error.message.includes("not supported by Yahoo Finance for currency pairs")) {
+                 errorMessage = `エラー: ドル円の '${currentInterval}' インターバルはYahoo Financeでサポートされていない可能性があります。`;
+            } else if (error.message.includes("Not enough data")) {
+                errorMessage = `エラー: ドル円の '${currentInterval}' インターバルで十分なデータがありません。`;
+            }
+            console.error(errorMessage);
+
+            if (currentInterval !== defaultInterval && dataFetchAttempted === 0) {
+                // Try fetching with the default interval and display a warning
+                wrapper.querySelector(`#usd-jpy-chart`).innerText = `${errorMessage} 日足で再試行します...`;
+                currentInterval = defaultInterval;
+                dataFetchAttempted++;
+                chartsContainer.innerHTML = ''; // Clear for retry
+                continue; // Retry with default interval
+            } else {
+                wrapper.querySelector(`#usd-jpy-chart`).innerText = `${errorMessage} 日足データも取得できませんでした。`;
+                return; // Failed even with default interval
+            }
         }
-    });
-    rsiChart.priceScale().applyOptions({
-        minimum: 0,
-        maximum: 100,
-    });
 
-    const rsiSeries = rsiChart.addLineSeries({ color: '#8A2BE2', lineWidth: 1, title: 'RSI(14)' });
-    rsiSeries.setData(rsiData);
+        // If data was successfully fetched, break the loop
+        if (data && data.length > 0) {
+            // Display a message if a fallback was used
+            if (interval !== currentInterval) {
+                 statusMessage.textContent = `注意: ドル円の '${interval}' インターバルはサポートされていません。日足データが表示されています。`;
+            } else {
+                 statusMessage.textContent = `表示中: USD/JPY (${currentInterval}) - 60秒ごとに更新`;
+            }
 
-    // Add RSI bands
-    rsiSeries.createPriceLine({ price: 70, color: 'orange', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '70' });
-    rsiSeries.createPriceLine({ price: 30, color: 'green', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30' });
+            const closePrices = data.map(d => d.close);
 
-    // Add RSI sharp change markers (same logic as Python script)
-    const rsiDiffMarkers = [];
-    for (let i = 1; i < rsiData.length; i++) {
-        const diff = rsiData[i].value - rsiData[i-1].value;
-        if (diff >= 10) {
-            rsiDiffMarkers.push({ time: rsiData[i].time, position: 'belowBar', color: 'red', shape: 'arrowUp', text: '▲' });
-        } else if (diff <= -10) {
-            rsiDiffMarkers.push({ time: rsiData[i].time, position: 'aboveBar', color: 'blue', shape: 'arrowDown', text: '▼' });
+            // 3. Calculate Bollinger Bands
+            const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
+            const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+
+            const bb1 = BollingerBands.calculate(bbInput1);
+            const bb2 = BollingerBands.calculate(bbInput2);
+
+            // 3.5. Calculate EMA
+            const emaInput = { period: 20, values: closePrices };
+            const ema = EMA.calculate(emaInput);
+
+            // Align indicator data with main chart data
+            const dataOffset = data.length - bb1.length;
+            const middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
+            const upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+            const lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+            const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+            const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+            
+            const emaOffset = data.length - ema.length;
+            const emaData = ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
+
+            // 4. Create and configure chart
+            const usdJpyChart = createChart(wrapper.querySelector(`#usd-jpy-chart`));
+
+            // Add Bollinger Band series FIRST so they are in the background
+            const middleBandSeries = usdJpyChart.addLineSeries({ color: 'yellow', lineWidth: 1, title: 'BB 0σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            const upperBand1Series = usdJpyChart.addLineSeries({ color: 'green', lineWidth: 1, title: 'BB +1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            const lowerBand1Series = usdJpyChart.addLineSeries({ color: 'green', lineWidth: 1, title: 'BB -1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            const upperBand2Series = usdJpyChart.addLineSeries({ color: 'purple', lineWidth: 1, title: 'BB +2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            const lowerBand2Series = usdJpyChart.addLineSeries({ color: 'purple', lineWidth: 1, title: 'BB -2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            
+            middleBandSeries.setData(middleBandData);
+            upperBand1Series.setData(upperBand1Data);
+            lowerBand1Series.setData(lowerBand1Data);
+            upperBand2Series.setData(upperBand2Data);
+            lowerBand2Series.setData(lowerBand2Data);
+
+            // Add EMA series
+            const emaSeries = usdJpyChart.addLineSeries({ color: 'orange', lineWidth: 1, title: 'EMA 20', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areEmaVisible });
+            emaSeries.setData(emaData);
+
+            // Add Candlestick series last so it's in the foreground
+            const candleSeries = usdJpyChart.addCandlestickSeries({
+                upColor: '#ff4c4c',
+                downColor: '#4c6aff',
+                borderVisible: false,
+                wickUpColor: '#ff4c4c',
+                wickDownColor: '#4c6aff',
+            });
+            candleSeries.setData(data);
+
+            // Adjust the visible range to show the latest data
+            usdJpyChart.timeScale().fitContent();
+            
+            return {
+                chart: usdJpyChart,
+                container: wrapper.querySelector(`#usd-jpy-chart`),
+                candleSeries,
+                middleBandSeries,
+                upperBand1Series,
+                lowerBand1Series,
+                upperBand2Series,
+                lowerBand2Series,
+                emaSeries, // Store EMA series
+                ticker: 'USDJPY=X', // Store ticker for easy access during updates
+                interval: currentInterval, // Store currentInterval as the actual interval used
+            };
         }
+        dataFetchAttempted++; // Increment attempt counter if loop continues
     }
-    rsiSeries.setMarkers(rsiDiffMarkers);
-
-    rsiChart.timeScale().setVisible(false);
-
-    // Sync crosshairs across charts for this ticker
-    ohlcChart.timeScale().subscribeVisibleTimeRangeChange(timeRange => {
-        priceMaChart.timeScale().setVisibleTimeRange(timeRange);
-        rsiChart.timeScale().setVisibleTimeRange(timeRange);
-    });
-    priceMaChart.timeScale().subscribeVisibleTimeRangeChange(timeRange => {
-        ohlcChart.timeScale().setVisibleTimeRange(timeRange);
-        rsiChart.timeScale().setVisibleTimeRange(timeRange);
-    });
-    rsiChart.timeScale().subscribeVisibleTimeRangeChange(timeRange => {
-        ohlcChart.timeScale().setVisibleTimeRange(timeRange);
-        priceMaChart.timeScale().setVisibleTimeRange(timeRange);
-    });
-
+    // If the loop finishes without returning, it means an error occurred
+    return null; // Indicate failure to render
 }
 
 /**
  * Main function to start/update the charting process.
+ * @param {string} dataType The type of data to display ('stock' or 'usd_jpy').
  */
-async function start() {
-    // Clear previous state
+async function start(dataType) {
+    // Clear previous update interval
     if (updateIntervalId) {
         clearInterval(updateIntervalId);
     }
+    
+    // Clear existing charts from DOM and reset chartObjects
     chartsContainer.innerHTML = '';
     chartObjects = [];
     statusMessage.textContent = 'チャートを読み込んでいます...';
 
-    const tickers = tickersInput.value.split(',').map(t => t.trim()).filter(t => t);
-    const interval = intervalSelect.value;
-    
-    // Add ".T" for Japanese stocks if not present
-    const formattedTickers = tickers.map(c => c.endsWith(".T") ? c : `${c}.T`);
+    currentDataType = dataType; // Update global data type
 
-    await Promise.all(
-        formattedTickers.map(ticker => renderChartForTicker(ticker, interval))
-    );
+    if (dataType === 'stock') {
+        currentTickers = tickersInput.value.split(',').map(t => t.trim()).filter(t => t);
+        currentInterval = intervalSelect.value;
+        
+        // Add ".T" for Japanese stocks if not present
+        const formattedTickers = currentTickers.map(c => c.endsWith(".T") ? c : `${c}.T`);
 
-    statusMessage.textContent = `表示中: ${formattedTickers.join(', ')} (${interval}) - 60秒ごとに更新`;
+        await renderChartsForStocks(formattedTickers, currentInterval);
+        statusMessage.textContent = `表示中: ${formattedTickers.join(', ')} (${currentInterval}) - 60秒ごとに更新`;
+        updateIntervalId = setInterval(refreshChartData, 60 * 1000);
 
-    // Set up auto-update
-    updateIntervalId = setInterval(start, 60 * 1000);
+    } else if (dataType === 'usd_jpy') {
+        currentTickers = ['USDJPY=X']; // USD/JPY has a fixed ticker
+        currentInterval = intervalSelect.value; // Get the selected interval
+        const usdJpyChartObj = await renderChartForUsdJpy(currentInterval); // Pass interval to render function
+        if (usdJpyChartObj) {
+            chartObjects.push(usdJpyChartObj);
+        }
+        statusMessage.textContent = `表示中: USD/JPY (${currentInterval}) - 60秒ごとに更新`;
+        updateIntervalId = setInterval(refreshChartData, 60 * 1000);
+    }
 }
 
 // --- Event Listeners ---
@@ -227,7 +563,36 @@ window.addEventListener('resize', () => {
     });
 });
 
-startButton.addEventListener('click', start);
+startButton.addEventListener('click', () => start(currentDataType));
+toggleBbButton.addEventListener('click', toggleBollingerBandsVisibility);
+toggleEmaButton.addEventListener('click', toggleEmaVisibility);
+
+stockToggle.addEventListener('click', () => {
+    currentDataType = 'stock';
+    stockToggle.classList.add('active');
+    usdJpyToggle.classList.remove('active');
+    updateIntervalOptions(stockIntervalOptions, '1d'); // Update interval options
+    updateTickerInputVisibility(); // Update visibility
+    start(currentDataType);
+});
+
+usdJpyToggle.addEventListener('click', () => {
+    currentDataType = 'usd_jpy';
+    usdJpyToggle.classList.add('active');
+    stockToggle.classList.remove('active');
+    updateIntervalOptions(usdJpyIntervalOptions, '1d'); // Update interval options
+    updateTickerInputVisibility(); // Update visibility
+    start(currentDataType);
+});
 
 // --- Initial Load ---
-start();
+// Ensure the correct toggle button is active and interval options are set on initial load
+if (currentDataType === 'stock') {
+    stockToggle.classList.add('active');
+    updateIntervalOptions(stockIntervalOptions, '1d');
+} else {
+    usdJpyToggle.classList.add('active');
+    updateIntervalOptions(usdJpyIntervalOptions, '1d');
+}
+updateTickerInputVisibility(); // Set initial visibility
+start(currentDataType);
