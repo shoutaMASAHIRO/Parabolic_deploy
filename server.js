@@ -69,7 +69,7 @@ app.get('/api/data', async (req, res) => {
     }
 });
 
-app.listen(port, () => {
-    console.log(`Proxy server listening at http://localhost:${port}`);
+app.listen(port, '0.0.0.0', () => {
+    console.log(`Proxy server listening at http://0.0.0.0:${port}`);
     console.log('API endpoint: /api/data?ticker=7203.T&interval=1d');
 });
