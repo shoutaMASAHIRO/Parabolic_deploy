@@ -13,6 +13,20 @@ const usdJpyToggle = document.getElementById('usdJpyToggle');
 const tickersInputGroup = tickersInput.closest('.input-group');
 const toggleBbButton = document.getElementById('toggle-bb-button');
 const toggleEmaButton = document.getElementById('toggle-ema-button');
+const bbPeriodInput = document.getElementById('bb-period');
+const ema1PeriodInput = document.getElementById('ema1-period');
+const ema2PeriodInput = document.getElementById('ema2-period');
+const ema3PeriodInput = document.getElementById('ema3-period');
+const applyIndicatorsButton = document.getElementById('apply-indicators-button');
+const toggleSettingsButton = document.getElementById('toggle-settings-button');
+const indicatorSettings = document.getElementById('indicator-settings');
+const toggleSubscribeButton = document.getElementById('toggle-subscribe-button');
+const subscribeSettings = document.getElementById('subscribe-settings');
+const emailInput = document.getElementById('email-input');
+const subscribeButton = document.getElementById('subscribe-button');
+const toggleEmailListButton = document.getElementById('toggle-email-list-button');
+const emailListPanel = document.getElementById('email-list-panel');
+const emailList = document.getElementById('email-list');
 
 // --- Global State ---
 let chartObjects = []; // To hold all chart instances and their series for updates
@@ -48,15 +62,25 @@ async function refreshChartData() {
             const closePrices = data.map(d => d.close);
 
             // Recalculate Bollinger Bands
-            const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
-            const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+            const bbPeriod = parseInt(bbPeriodInput.value) || 20;
+            const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+            const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
 
             const bb1 = BollingerBands.calculate(bbInput1);
             const bb2 = BollingerBands.calculate(bbInput2);
 
-            // Recalculate EMA
-            const emaInput = { period: 20, values: closePrices };
-            const ema = EMA.calculate(emaInput);
+            // Recalculate EMAs
+            const emaPeriods = [
+                { period: parseInt(ema1PeriodInput.value) || 10, color: 'yellow' },
+                { period: parseInt(ema2PeriodInput.value) || 25, color: 'yellow' },
+                { period: parseInt(ema3PeriodInput.value) || 50, color: 'yellow' }
+            ];
+            const emaDataArray = emaPeriods.map(({ period }) => {
+                const emaInput = { period, values: closePrices, exact: false };
+                const ema = EMA.calculate(emaInput);
+                const emaOffset = data.length - ema.length;
+                return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
+            });
 
             // Align indicator data with main chart data
             const dataOffset = data.length - bb1.length;
@@ -66,9 +90,6 @@ async function refreshChartData() {
             const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
             const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
 
-            const emaOffset = data.length - ema.length;
-            const emaData = ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
-
             // Update series data
             chartObj.candleSeries.setData(data);
             chartObj.middleBandSeries.setData(middleBandData);
@@ -76,8 +97,12 @@ async function refreshChartData() {
             chartObj.lowerBand1Series.setData(lowerBand1Data);
             chartObj.upperBand2Series.setData(upperBand2Data);
             chartObj.lowerBand2Series.setData(lowerBand2Data);
-            if (chartObj.emaSeries) { // Check if EMA series exists for this chart
-                chartObj.emaSeries.setData(emaData);
+            
+            // Update all EMA series
+            if (chartObj.emaSeriesArray && chartObj.emaSeriesArray.length > 0) {
+                chartObj.emaSeriesArray.forEach((emaSeries, index) => {
+                    emaSeries.setData(emaDataArray[index]);
+                });
             }
             
             // Do NOT call fitContent() here, as it would reset user's zoom/pan
@@ -162,7 +187,6 @@ function createChart(container, options = {}) {
         width: container.clientWidth,
         height: container.clientHeight,
     });
-    chartObjects.push({ container, chart });
     return chart;
 }
 
@@ -302,15 +326,26 @@ async function renderChartForTicker(ticker, interval) {
     const closePrices = data.map(d => d.close);
 
     // 3. Calculate Bollinger Bands
-    const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
-    const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+    const bbPeriod = parseInt(bbPeriodInput.value) || 20;
+    const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+    const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
 
     const bb1 = BollingerBands.calculate(bbInput1);
     const bb2 = BollingerBands.calculate(bbInput2);
 
-    // 3.5. Calculate EMA
-    const emaInput = { period: 20, values: closePrices };
-    const ema = EMA.calculate(emaInput);
+    // 3.5. Calculate EMAs
+    const emaPeriods = [
+        { period: parseInt(ema1PeriodInput.value) || 10, color: 'yellow' },
+        { period: parseInt(ema2PeriodInput.value) || 25, color: 'yellow' },
+        { period: parseInt(ema3PeriodInput.value) || 50, color: 'yellow' }
+    ];
+
+    const emaDataArray = emaPeriods.map(({ period }) => {
+        const emaInput = { period, values: closePrices, exact: false };
+        const ema = EMA.calculate(emaInput);
+        const emaOffset = data.length - ema.length;
+        return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
+    });
 
     // Align indicator data with main chart data
     const dataOffset = data.length - bb1.length;
@@ -320,18 +355,15 @@ async function renderChartForTicker(ticker, interval) {
     const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
     const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
 
-    const emaOffset = data.length - ema.length;
-    const emaData = ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
-
     // 4. Create and configure charts
     const ohlcChart = createChart(wrapper.querySelector(`#ohlc-${sanitizedTicker}`));
     
     // Add Bollinger Band series FIRST so they are in the background
-    const middleBandSeries = ohlcChart.addLineSeries({ color: 'yellow', lineWidth: 1, title: 'BB 0σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const upperBand1Series = ohlcChart.addLineSeries({ color: 'green', lineWidth: 1, title: 'BB +1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const lowerBand1Series = ohlcChart.addLineSeries({ color: 'green', lineWidth: 1, title: 'BB -1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const upperBand2Series = ohlcChart.addLineSeries({ color: 'purple', lineWidth: 1, title: 'BB +2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const lowerBand2Series = ohlcChart.addLineSeries({ color: 'purple', lineWidth: 1, title: 'BB -2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const middleBandSeries = ohlcChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB 0σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const upperBand1Series = ohlcChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB +1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const lowerBand1Series = ohlcChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB -1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const upperBand2Series = ohlcChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB +2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const lowerBand2Series = ohlcChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB -2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
     
     middleBandSeries.setData(middleBandData);
     upperBand1Series.setData(upperBand1Data);
@@ -340,8 +372,19 @@ async function renderChartForTicker(ticker, interval) {
     lowerBand2Series.setData(lowerBand2Data);
 
     // Add EMA series
-    const emaSeries = ohlcChart.addLineSeries({ color: 'orange', lineWidth: 1, title: 'EMA 20', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areEmaVisible });
-    emaSeries.setData(emaData);
+    const emaSeriesArray = emaPeriods.map((emaConfig, index) => {
+        const emaSeries = ohlcChart.addLineSeries({
+            color: emaConfig.color,
+            lineWidth: 1,
+            title: `EMA ${emaConfig.period}`,
+            crosshairMarkerVisible: false,
+            priceLineVisible: false,
+            lastValueVisible: false,
+            visible: areEmaVisible
+        });
+        emaSeries.setData(emaDataArray[index]);
+        return emaSeries;
+    });
 
     // Add Candlestick series last so it's in the foreground
     const candleSeries = ohlcChart.addCandlestickSeries({
@@ -362,7 +405,7 @@ async function renderChartForTicker(ticker, interval) {
         lowerBand1Series,
         upperBand2Series,
         lowerBand2Series,
-        emaSeries, // Store EMA series
+        emaSeriesArray, // Store EMA series array
         ticker, // Store ticker for easy access during updates
         interval, // Store interval for easy access during updates
     };
@@ -442,15 +485,26 @@ async function renderChartForUsdJpy(interval) {
             const closePrices = data.map(d => d.close);
 
             // 3. Calculate Bollinger Bands
-            const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
-            const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+            const bbPeriod = parseInt(bbPeriodInput.value) || 20;
+            const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+            const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
 
             const bb1 = BollingerBands.calculate(bbInput1);
             const bb2 = BollingerBands.calculate(bbInput2);
 
-            // 3.5. Calculate EMA
-            const emaInput = { period: 20, values: closePrices };
-            const ema = EMA.calculate(emaInput);
+            // 3.5. Calculate EMAs
+            const emaPeriods = [
+                { period: parseInt(ema1PeriodInput.value) || 10, color: 'yellow' },
+                { period: parseInt(ema2PeriodInput.value) || 25, color: 'yellow' },
+                { period: parseInt(ema3PeriodInput.value) || 50, color: 'yellow' }
+            ];
+        
+            const emaDataArray = emaPeriods.map(({ period }) => {
+                const emaInput = { period, values: closePrices, exact: false };
+                const ema = EMA.calculate(emaInput);
+                const emaOffset = data.length - ema.length;
+                return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
+            });
 
             // Align indicator data with main chart data
             const dataOffset = data.length - bb1.length;
@@ -459,19 +513,16 @@ async function renderChartForUsdJpy(interval) {
             const lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
             const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
             const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
-            
-            const emaOffset = data.length - ema.length;
-            const emaData = ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
 
             // 4. Create and configure chart
             const usdJpyChart = createChart(wrapper.querySelector(`#usd-jpy-chart`));
 
             // Add Bollinger Band series FIRST so they are in the background
-            const middleBandSeries = usdJpyChart.addLineSeries({ color: 'yellow', lineWidth: 1, title: 'BB 0σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-            const upperBand1Series = usdJpyChart.addLineSeries({ color: 'green', lineWidth: 1, title: 'BB +1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-            const lowerBand1Series = usdJpyChart.addLineSeries({ color: 'green', lineWidth: 1, title: 'BB -1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-            const upperBand2Series = usdJpyChart.addLineSeries({ color: 'purple', lineWidth: 1, title: 'BB +2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-            const lowerBand2Series = usdJpyChart.addLineSeries({ color: 'purple', lineWidth: 1, title: 'BB -2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            const middleBandSeries = usdJpyChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB 0σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            const upperBand1Series = usdJpyChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB +1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            const lowerBand1Series = usdJpyChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB -1σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            const upperBand2Series = usdJpyChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB +2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+            const lowerBand2Series = usdJpyChart.addLineSeries({ color: 'purple', lineWidth: 2, title: 'BB -2σ', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
             
             middleBandSeries.setData(middleBandData);
             upperBand1Series.setData(upperBand1Data);
@@ -480,8 +531,19 @@ async function renderChartForUsdJpy(interval) {
             lowerBand2Series.setData(lowerBand2Data);
 
             // Add EMA series
-            const emaSeries = usdJpyChart.addLineSeries({ color: 'orange', lineWidth: 1, title: 'EMA 20', crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areEmaVisible });
-            emaSeries.setData(emaData);
+            const emaSeriesArray = emaPeriods.map((emaConfig, index) => {
+                const emaSeries = usdJpyChart.addLineSeries({
+                    color: emaConfig.color,
+                    lineWidth: 1,
+                    title: `EMA ${emaConfig.period}`,
+                    crosshairMarkerVisible: false,
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                    visible: areEmaVisible
+                });
+                emaSeries.setData(emaDataArray[index]);
+                return emaSeries;
+            });
 
             // Add Candlestick series last so it's in the foreground
             const candleSeries = usdJpyChart.addCandlestickSeries({
@@ -505,7 +567,7 @@ async function renderChartForUsdJpy(interval) {
                 lowerBand1Series,
                 upperBand2Series,
                 lowerBand2Series,
-                emaSeries, // Store EMA series
+                emaSeriesArray, // Store EMA series array
                 ticker: 'USDJPY=X', // Store ticker for easy access during updates
                 interval: currentInterval, // Store currentInterval as the actual interval used
             };
@@ -566,6 +628,86 @@ window.addEventListener('resize', () => {
 startButton.addEventListener('click', () => start(currentDataType));
 toggleBbButton.addEventListener('click', toggleBollingerBandsVisibility);
 toggleEmaButton.addEventListener('click', toggleEmaVisibility);
+applyIndicatorsButton.addEventListener('click', () => {
+    start(currentDataType);
+    indicatorSettings.classList.add('hidden'); // Hide the settings panel after applying
+});
+
+toggleSettingsButton.addEventListener('click', () => {
+    indicatorSettings.classList.toggle('hidden');
+});
+
+toggleSubscribeButton.addEventListener('click', () => {
+    subscribeSettings.classList.toggle('hidden');
+});
+
+subscribeButton.addEventListener('click', async () => {
+    const email = emailInput.value;
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+        statusMessage.textContent = '有効なメールアドレスを入力してください。';
+        return;
+    }
+
+    try {
+        statusMessage.textContent = '登録中...';
+        const response = await fetch('/api/subscribe', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ email }),
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            statusMessage.textContent = result.message;
+            emailInput.value = ''; // Clear input on success
+            setTimeout(() => {
+                subscribeSettings.classList.add('hidden');
+            }, 1500); // Hide panel after a short delay
+        } else {
+            throw new Error(result.error || '登録に失敗しました。');
+        }
+    } catch (error) {
+        statusMessage.textContent = error.message;
+    }
+});
+
+toggleEmailListButton.addEventListener('click', async () => {
+    const isHidden = emailListPanel.classList.contains('hidden');
+
+    if (isHidden) {
+        try {
+            const response = await fetch('/api/emails');
+            if (!response.ok) {
+                throw new Error('Could not fetch email list.');
+            }
+            const emails = await response.json();
+            
+            emailList.innerHTML = ''; // Clear previous list
+
+            if (emails.length === 0) {
+                const li = document.createElement('li');
+                li.textContent = 'No emails subscribed.';
+                emailList.appendChild(li);
+            } else {
+                emails.forEach(item => {
+                    const li = document.createElement('li');
+                    li.textContent = item.email;
+                    emailList.appendChild(li);
+                });
+            }
+            emailListPanel.classList.remove('hidden');
+        } catch (error) {
+            console.error('Failed to fetch emails:', error);
+            statusMessage.textContent = 'Failed to load email list.';
+        }
+    } else {
+        emailListPanel.classList.add('hidden');
+    }
+});
+
 
 stockToggle.addEventListener('click', () => {
     currentDataType = 'stock';

@@ -7221,6 +7221,20 @@
   var tickersInputGroup = tickersInput.closest(".input-group");
   var toggleBbButton = document.getElementById("toggle-bb-button");
   var toggleEmaButton = document.getElementById("toggle-ema-button");
+  var bbPeriodInput = document.getElementById("bb-period");
+  var ema1PeriodInput = document.getElementById("ema1-period");
+  var ema2PeriodInput = document.getElementById("ema2-period");
+  var ema3PeriodInput = document.getElementById("ema3-period");
+  var applyIndicatorsButton = document.getElementById("apply-indicators-button");
+  var toggleSettingsButton = document.getElementById("toggle-settings-button");
+  var indicatorSettings = document.getElementById("indicator-settings");
+  var toggleSubscribeButton = document.getElementById("toggle-subscribe-button");
+  var subscribeSettings = document.getElementById("subscribe-settings");
+  var emailInput = document.getElementById("email-input");
+  var subscribeButton = document.getElementById("subscribe-button");
+  var toggleEmailListButton = document.getElementById("toggle-email-list-button");
+  var emailListPanel = document.getElementById("email-list-panel");
+  var emailList = document.getElementById("email-list");
   var chartObjects = [];
   var updateIntervalId = null;
   var currentDataType = "stock";
@@ -7243,28 +7257,38 @@
           continue;
         }
         const closePrices = data.map((d2) => d2.close);
-        const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
-        const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+        const bbPeriod = parseInt(bbPeriodInput.value) || 20;
+        const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+        const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
         const bb1 = BollingerBands.calculate(bbInput1);
         const bb2 = BollingerBands.calculate(bbInput2);
-        const emaInput = { period: 20, values: closePrices };
-        const ema2 = EMA.calculate(emaInput);
+        const emaPeriods = [
+          { period: parseInt(ema1PeriodInput.value) || 10, color: "yellow" },
+          { period: parseInt(ema2PeriodInput.value) || 25, color: "yellow" },
+          { period: parseInt(ema3PeriodInput.value) || 50, color: "yellow" }
+        ];
+        const emaDataArray = emaPeriods.map(({ period }) => {
+          const emaInput = { period, values: closePrices, exact: false };
+          const ema2 = EMA.calculate(emaInput);
+          const emaOffset = data.length - ema2.length;
+          return ema2.map((d2, i) => ({ time: data[i + emaOffset].time, value: d2 }));
+        });
         const dataOffset = data.length - bb1.length;
         const middleBandData = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.middle }));
         const upperBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
         const lowerBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
         const upperBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
         const lowerBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
-        const emaOffset = data.length - ema2.length;
-        const emaData = ema2.map((d2, i) => ({ time: data[i + emaOffset].time, value: d2 }));
         chartObj.candleSeries.setData(data);
         chartObj.middleBandSeries.setData(middleBandData);
         chartObj.upperBand1Series.setData(upperBand1Data);
         chartObj.lowerBand1Series.setData(lowerBand1Data);
         chartObj.upperBand2Series.setData(upperBand2Data);
         chartObj.lowerBand2Series.setData(lowerBand2Data);
-        if (chartObj.emaSeries) {
-          chartObj.emaSeries.setData(emaData);
+        if (chartObj.emaSeriesArray && chartObj.emaSeriesArray.length > 0) {
+          chartObj.emaSeriesArray.forEach((emaSeries, index) => {
+            emaSeries.setData(emaDataArray[index]);
+          });
         }
       } catch (error) {
         console.error(`Failed to refresh data for ${chartObj.ticker}:`, error);
@@ -7323,7 +7347,6 @@
       width: container.clientWidth,
       height: container.clientHeight
     });
-    chartObjects.push({ container, chart });
     return chart;
   }
   function updateTickerInputVisibility() {
@@ -7409,33 +7432,52 @@
       return;
     }
     const closePrices = data.map((d2) => d2.close);
-    const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
-    const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+    const bbPeriod = parseInt(bbPeriodInput.value) || 20;
+    const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+    const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
     const bb1 = BollingerBands.calculate(bbInput1);
     const bb2 = BollingerBands.calculate(bbInput2);
-    const emaInput = { period: 20, values: closePrices };
-    const ema2 = EMA.calculate(emaInput);
+    const emaPeriods = [
+      { period: parseInt(ema1PeriodInput.value) || 10, color: "yellow" },
+      { period: parseInt(ema2PeriodInput.value) || 25, color: "yellow" },
+      { period: parseInt(ema3PeriodInput.value) || 50, color: "yellow" }
+    ];
+    const emaDataArray = emaPeriods.map(({ period }) => {
+      const emaInput = { period, values: closePrices, exact: false };
+      const ema2 = EMA.calculate(emaInput);
+      const emaOffset = data.length - ema2.length;
+      return ema2.map((d2, i) => ({ time: data[i + emaOffset].time, value: d2 }));
+    });
     const dataOffset = data.length - bb1.length;
     const middleBandData = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.middle }));
     const upperBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
     const lowerBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
     const upperBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
     const lowerBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
-    const emaOffset = data.length - ema2.length;
-    const emaData = ema2.map((d2, i) => ({ time: data[i + emaOffset].time, value: d2 }));
     const ohlcChart = createChart(wrapper.querySelector(`#ohlc-${sanitizedTicker}`));
-    const middleBandSeries = ohlcChart.addLineSeries({ color: "yellow", lineWidth: 1, title: "BB 0\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const upperBand1Series = ohlcChart.addLineSeries({ color: "green", lineWidth: 1, title: "BB +1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const lowerBand1Series = ohlcChart.addLineSeries({ color: "green", lineWidth: 1, title: "BB -1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const upperBand2Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 1, title: "BB +2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const lowerBand2Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 1, title: "BB -2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const middleBandSeries = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB 0\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const upperBand1Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB +1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const lowerBand1Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB -1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const upperBand2Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB +2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const lowerBand2Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB -2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
     middleBandSeries.setData(middleBandData);
     upperBand1Series.setData(upperBand1Data);
     lowerBand1Series.setData(lowerBand1Data);
     upperBand2Series.setData(upperBand2Data);
     lowerBand2Series.setData(lowerBand2Data);
-    const emaSeries = ohlcChart.addLineSeries({ color: "orange", lineWidth: 1, title: "EMA 20", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areEmaVisible });
-    emaSeries.setData(emaData);
+    const emaSeriesArray = emaPeriods.map((emaConfig, index) => {
+      const emaSeries = ohlcChart.addLineSeries({
+        color: emaConfig.color,
+        lineWidth: 1,
+        title: `EMA ${emaConfig.period}`,
+        crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        visible: areEmaVisible
+      });
+      emaSeries.setData(emaDataArray[index]);
+      return emaSeries;
+    });
     const candleSeries = ohlcChart.addCandlestickSeries({
       upColor: "#ff4c4c",
       downColor: "#4c6aff",
@@ -7453,8 +7495,8 @@
       lowerBand1Series,
       upperBand2Series,
       lowerBand2Series,
-      emaSeries,
-      // Store EMA series
+      emaSeriesArray,
+      // Store EMA series array
       ticker,
       // Store ticker for easy access during updates
       interval
@@ -7512,33 +7554,52 @@
           statusMessage.textContent = `\u8868\u793A\u4E2D: USD/JPY (${currentInterval2}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
         }
         const closePrices = data.map((d2) => d2.close);
-        const bbInput1 = { period: 20, values: closePrices, stdDev: 1 };
-        const bbInput2 = { period: 20, values: closePrices, stdDev: 2 };
+        const bbPeriod = parseInt(bbPeriodInput.value) || 20;
+        const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+        const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
         const bb1 = BollingerBands.calculate(bbInput1);
         const bb2 = BollingerBands.calculate(bbInput2);
-        const emaInput = { period: 20, values: closePrices };
-        const ema2 = EMA.calculate(emaInput);
+        const emaPeriods = [
+          { period: parseInt(ema1PeriodInput.value) || 10, color: "yellow" },
+          { period: parseInt(ema2PeriodInput.value) || 25, color: "yellow" },
+          { period: parseInt(ema3PeriodInput.value) || 50, color: "yellow" }
+        ];
+        const emaDataArray = emaPeriods.map(({ period }) => {
+          const emaInput = { period, values: closePrices, exact: false };
+          const ema2 = EMA.calculate(emaInput);
+          const emaOffset = data.length - ema2.length;
+          return ema2.map((d2, i) => ({ time: data[i + emaOffset].time, value: d2 }));
+        });
         const dataOffset = data.length - bb1.length;
         const middleBandData = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.middle }));
         const upperBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
         const lowerBand1Data = bb1.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
         const upperBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
         const lowerBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
-        const emaOffset = data.length - ema2.length;
-        const emaData = ema2.map((d2, i) => ({ time: data[i + emaOffset].time, value: d2 }));
         const usdJpyChart = createChart(wrapper.querySelector(`#usd-jpy-chart`));
-        const middleBandSeries = usdJpyChart.addLineSeries({ color: "yellow", lineWidth: 1, title: "BB 0\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-        const upperBand1Series = usdJpyChart.addLineSeries({ color: "green", lineWidth: 1, title: "BB +1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-        const lowerBand1Series = usdJpyChart.addLineSeries({ color: "green", lineWidth: 1, title: "BB -1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-        const upperBand2Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 1, title: "BB +2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-        const lowerBand2Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 1, title: "BB -2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        const middleBandSeries = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB 0\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        const upperBand1Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB +1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        const lowerBand1Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB -1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        const upperBand2Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB +2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+        const lowerBand2Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB -2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
         middleBandSeries.setData(middleBandData);
         upperBand1Series.setData(upperBand1Data);
         lowerBand1Series.setData(lowerBand1Data);
         upperBand2Series.setData(upperBand2Data);
         lowerBand2Series.setData(lowerBand2Data);
-        const emaSeries = usdJpyChart.addLineSeries({ color: "orange", lineWidth: 1, title: "EMA 20", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areEmaVisible });
-        emaSeries.setData(emaData);
+        const emaSeriesArray = emaPeriods.map((emaConfig, index) => {
+          const emaSeries = usdJpyChart.addLineSeries({
+            color: emaConfig.color,
+            lineWidth: 1,
+            title: `EMA ${emaConfig.period}`,
+            crosshairMarkerVisible: false,
+            priceLineVisible: false,
+            lastValueVisible: false,
+            visible: areEmaVisible
+          });
+          emaSeries.setData(emaDataArray[index]);
+          return emaSeries;
+        });
         const candleSeries = usdJpyChart.addCandlestickSeries({
           upColor: "#ff4c4c",
           downColor: "#4c6aff",
@@ -7557,8 +7618,8 @@
           lowerBand1Series,
           upperBand2Series,
           lowerBand2Series,
-          emaSeries,
-          // Store EMA series
+          emaSeriesArray,
+          // Store EMA series array
           ticker: "USDJPY=X",
           // Store ticker for easy access during updates
           interval: currentInterval2
@@ -7603,6 +7664,75 @@
   startButton.addEventListener("click", () => start(currentDataType));
   toggleBbButton.addEventListener("click", toggleBollingerBandsVisibility);
   toggleEmaButton.addEventListener("click", toggleEmaVisibility);
+  applyIndicatorsButton.addEventListener("click", () => {
+    start(currentDataType);
+    indicatorSettings.classList.add("hidden");
+  });
+  toggleSettingsButton.addEventListener("click", () => {
+    indicatorSettings.classList.toggle("hidden");
+  });
+  toggleSubscribeButton.addEventListener("click", () => {
+    subscribeSettings.classList.toggle("hidden");
+  });
+  subscribeButton.addEventListener("click", async () => {
+    const email = emailInput.value;
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+      statusMessage.textContent = "\u6709\u52B9\u306A\u30E1\u30FC\u30EB\u30A2\u30C9\u30EC\u30B9\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002";
+      return;
+    }
+    try {
+      statusMessage.textContent = "\u767B\u9332\u4E2D...";
+      const response = await fetch("/api/subscribe", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ email })
+      });
+      const result = await response.json();
+      if (response.ok) {
+        statusMessage.textContent = result.message;
+        emailInput.value = "";
+        setTimeout(() => {
+          subscribeSettings.classList.add("hidden");
+        }, 1500);
+      } else {
+        throw new Error(result.error || "\u767B\u9332\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002");
+      }
+    } catch (error) {
+      statusMessage.textContent = error.message;
+    }
+  });
+  toggleEmailListButton.addEventListener("click", async () => {
+    const isHidden = emailListPanel.classList.contains("hidden");
+    if (isHidden) {
+      try {
+        const response = await fetch("/api/emails");
+        if (!response.ok) {
+          throw new Error("Could not fetch email list.");
+        }
+        const emails = await response.json();
+        emailList.innerHTML = "";
+        if (emails.length === 0) {
+          const li2 = document.createElement("li");
+          li2.textContent = "No emails subscribed.";
+          emailList.appendChild(li2);
+        } else {
+          emails.forEach((item) => {
+            const li2 = document.createElement("li");
+            li2.textContent = item.email;
+            emailList.appendChild(li2);
+          });
+        }
+        emailListPanel.classList.remove("hidden");
+      } catch (error) {
+        console.error("Failed to fetch emails:", error);
+        statusMessage.textContent = "Failed to load email list.";
+      }
+    } else {
+      emailListPanel.classList.add("hidden");
+    }
+  });
   stockToggle.addEventListener("click", () => {
     currentDataType = "stock";
     stockToggle.classList.add("active");

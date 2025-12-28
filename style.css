@@ -1,153 +1,320 @@
+* {
+    box-sizing: border-box;
+}
+
 :root {
     --bg-color: #000000;
-    --pane-color: #1c1c1c;
+    --pane-color: #121212;
     --text-color: #ffffff;
-    --label-color: #bbbbbb;
-    --grid-color: rgba(255, 255, 255, 0.15);
-    --border-color: #555555;
+    --label-color: #a8a8a8;
+    --grid-color: rgba(255, 255, 255, 0.1);
+    --border-color: #363636;
     --up-color: #ff4c4c;
     --down-color: #4c6aff;
-    --ma-color: orange;
-    --rsi-color: #8A2BE2;
-    --rsi-up-signal: red;
-    --rsi-down-signal: blue;
+    --accent-color: #4c6aff; /* Using the 'down' color as the main accent */
 }
 
 body {
     background-color: var(--bg-color);
     color: var(--text-color);
-    font-family: 'MS Gothic', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     margin: 0;
     padding: 0;
+    font-size: 16px;
 }
 
 header {
-    padding: 1rem 2rem;
+    padding: 0.75rem 2rem;
     border-bottom: 1px solid var(--border-color);
-    background-color: #111;
-}
-
-h1 {
-    text-align: center;
-    margin: 0 0 1rem 0;
-    font-size: 1.8rem;
+    background-color: var(--bg-color);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 1001; /* Ensure it's above chart but below modals/popups if any */
 }
 
 #controls {
     display: flex;
-    justify-content: center;
-    align-items: flex-end;
+    align-items: center;
     gap: 1.5rem;
-    flex-wrap: wrap;
 }
 
 .input-group {
     display: flex;
-    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
 }
 
 label {
     font-size: 0.9rem;
     color: var(--label-color);
-    margin-bottom: 0.3rem;
+    margin-bottom: 0; /* Reset margin */
 }
 
 input[type="text"],
+input[type="number"],
 select {
-    background-color: var(--pane-color);
-    color: var(--text-color);
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    padding: 0.5rem;
-    font-size: 1rem;
-}
-
-button {
-    background-color: var(--down-color);
+    background-color: transparent;
     color: var(--text-color);
     border: none;
-    border-radius: 4px;
-    padding: 0.6rem 1.2rem;
+    border-bottom: 1px solid var(--border-color);
+    border-radius: 0;
+    padding: 0.4rem 0.2rem;
     font-size: 1rem;
+    text-align: center;
+    width: 80px; /* Give a consistent width */
+}
+
+input:focus, select:focus {
+    outline: none;
+    border-bottom-color: var(--accent-color);
+}
+
+/* General Button Style Reset */
+button {
+    background-color: transparent;
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.5rem 1rem;
+    font-size: 0.9rem;
+    font-weight: 600;
     cursor: pointer;
-    transition: background-color 0.2s;
+    transition: background-color 0.2s, color 0.2s;
 }
 
 button:hover {
-    background-color: #6a8dff;
+    background-color: var(--border-color);
+}
+
+/* Primary Button */
+#start-button {
+    background-color: var(--accent-color);
+    border-color: var(--accent-color);
+}
+
+#start-button:hover {
+    opacity: 0.9;
 }
 
 #status-message {
-    text-align: center;
-    margin-top: 1rem;
-    height: 1.2rem;
-    color: orange;
+    font-size: 0.8rem;
+    color: var(--label-color);
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: -20px; /* Position it below the header bar */
+    height: auto;
+    background: var(--bg-color);
+    padding: 0 5px;
 }
 
 main {
-    padding: 1rem;
+    flex-grow: 1;
+    max-width: 1200px; /* Fixed width for wide screens */
+}
+
+.main-container {
+    display: flex;
+    gap: 2rem;
+    padding: 2rem;
+    align-items: flex-start;
+    max-width: 1600px; /* Max width for the whole layout */
+    margin: 0 auto; /* Center the layout */
+}
+
+.sidebar-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex-basis: 250px;
+    flex-shrink: 0;
 }
 
 .chart-wrapper {
     margin-bottom: 2rem;
     border: 1px solid var(--border-color);
-    border-radius: 5px;
-    padding: 1rem;
-    background-color: #0a0a0a;
+    border-radius: 12px;
+    padding: 1.5rem;
+    background-color: var(--pane-color);
+    overflow: hidden;
 }
 
 .chart-title {
-    font-size: 1.5rem;
-    font-weight: bold;
-    margin: 0 0 1rem 1rem;
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin: 0 0 1.5rem 0.5rem;
 }
 
 .chart-container {
     width: 100%;
-    height: 350px;
+    min-height: 300px; /* Minimum height for readability */
+    height: 50vh; /* 50% of viewport height */
     position: relative;
 }
 
 .sub-chart-container {
     width: 100%;
-    height: 150px;
+    min-height: 100px;
+    height: 25vh; /* 25% of viewport height */
     position: relative;
 }
 
+/* Stock/USDJPY Toggle */
 .toggle-container {
     display: flex;
     justify-content: center;
-    margin-top: 1rem;
-    margin-bottom: 1rem;
+    margin: 1.5rem 0;
 }
 
 .toggle-container button {
     background-color: var(--pane-color);
     color: var(--label-color);
     border: 1px solid var(--border-color);
-    padding: 0.5rem 1rem;
-    cursor: pointer;
-    transition: background-color 0.2s, color 0.2s;
-    border-radius: 0; /* Reset default button border-radius */
-}
-
-.toggle-container button:first-child {
-    border-top-left-radius: 4px;
-    border-bottom-left-radius: 4px;
-}
-
-.toggle-container button:last-child {
-    border-top-right-radius: 4px;
-    border-bottom-right-radius: 4px;
+    padding: 0.6rem 1.5rem;
+    font-weight: 600;
 }
 
 .toggle-container button.active {
-    background-color: var(--down-color); /* Use a distinct color for active state */
+    background-color: var(--accent-color);
     color: var(--text-color);
-    border-color: var(--down-color);
+    border-color: var(--accent-color);
 }
 
 .toggle-container button:hover:not(.active) {
-    background-color: #333;
+    background-color: var(--border-color);
+}
+
+.toggle-container button:first-child {
+    border-top-left-radius: 8px;
+    border-bottom-left-radius: 8px;
+}
+
+.toggle-container button:last-child {
+    border-top-right-radius: 8px;
+    border-bottom-right-radius: 8px;
+}
+
+.email-list-container {
+    position: relative;
+    margin-left: 1rem;
+}
+
+#email-list-panel {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background-color: var(--pane-color);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    width: 300px;
+    max-height: 400px;
+    overflow-y: auto;
+    z-index: 1002;
+    margin-top: 0.5rem;
+}
+
+#email-list {
+    list-style: none;
+    padding: 0.5rem;
+    margin: 0;
+    color: var(--label-color);
+}
+
+#email-list li {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+#email-list li:last-child {
+    border-bottom: none;
+}
+
+
+/* Sidebar Controls */
+#indicator-settings, #subscribe-settings {
+    background-color: #1a1a1a; /* Slightly lighter than pane for depth */
+    padding: 1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+#indicator-settings .input-group, #subscribe-settings .input-group {
+    justify-content: space-between;
+}
+
+#indicator-settings input {
+    width: 60px;
+}
+
+#subscribe-settings input {
+    width: 100%; /* Email input should be wider */
+    text-align: left;
+    padding: 0.4rem;
+}
+
+/* Style the apply/subscribe buttons as primary */
+#indicator-settings #apply-indicators-button, #subscribe-settings #subscribe-button {
+    margin-top: 0.5rem;
+    background-color: var(--accent-color);
+    border-color: var(--accent-color);
     color: var(--text-color);
+}
+#indicator-settings #apply-indicators-button:hover, #subscribe-settings #subscribe-button:hover {
+    opacity: 0.9;
+}
+
+
+.hidden {
+    display: none !important;
+}
+
+/* Custom colors for specific toggle buttons */
+#toggle-bb-button {
+    background-color: purple;
+    border-color: purple;
+}
+
+#toggle-ema-button {
+    background-color: yellow;
+    border-color: yellow;
+    color: #121212; /* Dark text for yellow button */
+}
+
+#toggle-bb-button:hover, #toggle-ema-button:hover, #toggle-settings-button:hover {
+    opacity: 0.9;
+}
+
+@media (max-width: 992px) {
+    main {
+        max-width: none; /* Allow main to be fluid on narrow screens */
+        width: 100%; /* Ensure it explicitly takes full width */
+    }
+    
+    .main-container {
+        flex-direction: column;
+        padding: 1rem;
+        gap: 1rem;
+        align-items: center; /* Center items horizontally */
+    }
+
+    .sidebar-controls {
+        flex-basis: auto; /* Reset basis */
+        width: 100%;
+        align-items: stretch; /* Make buttons full width */
+    }
+
+    #controls {
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+
+    header {
+        padding: 1rem;
+    }
 }

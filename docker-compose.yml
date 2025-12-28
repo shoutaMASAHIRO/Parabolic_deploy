@@ -10,6 +10,24 @@ services:
       - "3000:3000"
     restart: unless-stopped
     container_name: parabolic_server
+    environment:
+      - DATABASE_URL=postgres://user:password@db:5432/parabolic
+    depends_on:
+      - db
+
+  # PostgreSQL Database
+  db:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=parabolic
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432" # Optional: for external access/debugging
+    restart: unless-stopped
+    container_name: parabolic_db
 
   # Frontend Nginx server
   frontend:
@@ -25,3 +43,6 @@ services:
       - server
     restart: unless-stopped
     container_name: parabolic_frontend
+
+volumes:
+  postgres_data:

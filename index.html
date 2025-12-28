@@ -10,9 +10,18 @@
     <div class="toggle-container">
         <button id="stockToggle" class="active">株価</button>
         <button id="usdJpyToggle">ドル円</button>
+
+        <div class="email-list-container">
+            <button id="toggle-email-list-button">登録済みメール</button>
+            <div id="email-list-panel" class="hidden">
+                <ul id="email-list">
+                    <!-- Emails will be populated here -->
+                </ul>
+            </div>
+        </div>
     </div>
     <header>
-        <h1></h1>
+        
         <div id="controls">
             <div class="input-group">
                 <label for="tickers-input">銘柄コード (例: 9166,7203)</label>
@@ -30,15 +39,49 @@
                 </select>
             </div>
             <button id="start-button">表示開始</button>
-            <button id="toggle-bb-button">BB表示/非表示</button>
-            <button id="toggle-ema-button">EMA表示/非表示</button>
+            <div id="status-message"></div>
         </div>
-        <div id="status-message"></div>
     </header>
 
-    <main id="charts-container">
-        <!-- Charts will be dynamically inserted here -->
-    </main>
+    <div class="main-container">
+        <main id="charts-container">
+            <!-- Charts will be dynamically inserted here -->
+        </main>
+        
+        <div class="sidebar-controls">
+            <div id="indicator-settings" class="hidden">
+                <div class="input-group">
+                    <label for="bb-period">BB期間</label>
+                    <input type="number" id="bb-period" value="20">
+                </div>
+                <div class="input-group">
+                    <label for="ema1-period">EMA 1期間</label>
+                    <input type="number" id="ema1-period" value="10">
+                </div>
+                <div class="input-group">
+                    <label for="ema2-period">EMA 2期間</label>
+                    <input type="number" id="ema2-period" value="25">
+                </div>
+                <div class="input-group">
+                    <label for="ema3-period">EMA 3期間</label>
+                    <input type="number" id="ema3-period" value="50">
+                </div>
+                <button id="apply-indicators-button">反映</button>
+            </div>
+            <button id="toggle-settings-button">期間設定</button>
+            <button id="toggle-bb-button">BB表示/非表示</button>
+            <button id="toggle-ema-button">EMA表示/非表示</button>
+            
+            <div id="subscribe-settings" class="hidden">
+                <div class="input-group">
+                    <label for="email-input">メールアドレス</label>
+                    <input type="email" id="email-input" placeholder="user@example.com">
+                </div>
+                <button id="subscribe-button">登録</button>
+            </div>
+            <button id="toggle-subscribe-button">メール登録</button>
+        </div>
+    </div>
     
     <script src="dist/bundle.js"></script>
 </body>

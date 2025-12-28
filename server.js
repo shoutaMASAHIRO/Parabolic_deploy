@@ -1,12 +1,38 @@
 const express = require('express');
 const yahooFinance = require('yahoo-finance2').default;
 const cors = require('cors');
+const { Pool } = require('pg');
 
 const app = express();
 const port = 3000;
 
-app.use(cors());
+// --- Database Setup ---
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
 
+async function createEmailsTable() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS emails (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('"emails" table checked/created successfully.');
+  } catch (err) {
+    console.error('Error creating "emails" table:', err);
+  } finally {
+    client.release();
+  }
+}
+
+// --- Middleware ---
+app.use(cors());
+app.use(express.json()); // Middleware to parse JSON bodies
 app.use(express.static('dist'));
 app.use(express.static(__dirname));
 
@@ -14,8 +40,47 @@ app.use(express.static(__dirname));
 const cache = {};
 const CACHE_TTL = 60 * 1000; // 60 seconds
 
+// --- API Endpoints ---
 
-    app.get('/api/data', async (req, res) => {
+// New endpoint to subscribe an email
+app.post('/api/subscribe', async (req, res) => {
+    const { email } = req.body;
+
+    // Basic email validation
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+        return res.status(400).json({ error: 'Please provide a valid email address.' });
+    }
+
+    try {
+        const result = await pool.query(
+            'INSERT INTO emails (email) VALUES ($1) ON CONFLICT (email) DO NOTHING RETURNING *',
+            [email]
+        );
+
+        if (result.rows.length > 0) {
+            return res.status(201).json({ message: 'Thank you for subscribing!', email: result.rows[0] });
+        } else {
+            return res.status(200).json({ message: 'You are already subscribed.' });
+        }
+    } catch (error) {
+        console.error('Database insertion error:', error);
+        return res.status(500).json({ error: 'An internal server error occurred.' });
+    }
+});
+
+// New endpoint to get all subscribed emails
+app.get('/api/emails', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT email FROM emails ORDER BY created_at DESC');
+        res.status(200).json(result.rows);
+    } catch (error) {
+        console.error('Database query error:', error);
+        return res.status(500).json({ error: 'An internal server error occurred.' });
+    }
+});
+
+
+app.get('/api/data', async (req, res) => {
         const { ticker, interval } = req.query;
 
         if (!ticker || !interval) {
@@ -183,8 +248,10 @@ app.get('/api/usd_jpy_data', async (req, res) => {
     }
 });
 
+// Start the server and create table
 app.listen(port, '0.0.0.0', () => {
     console.log(`Proxy server listening at http://0.0.0.0:${port}`);
     console.log('API endpoint for stocks: /api/data?ticker=7203.T&interval=1d');
     console.log('API endpoint for USD/JPY: /api/usd_jpy_data');
+    createEmailsTable();
 });
