@@ -7298,7 +7298,6 @@
     statusMessage.textContent = `\u8868\u793A\u4E2D: ${currentDataType === "stock" ? currentTickers.join(", ") : "USD/JPY"} (${currentInterval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
   }
   var stockIntervalOptions = [
-    { value: "1m", text: "1\u5206" },
     { value: "5m", text: "5\u5206" },
     { value: "15m", text: "15\u5206" },
     { value: "30m", text: "30\u5206" },
@@ -7307,7 +7306,6 @@
     { value: "1wk", text: "1\u9031\u9593" }
   ];
   var usdJpyIntervalOptions = [
-    { value: "1m", text: "1\u5206" },
     { value: "5m", text: "5\u5206" },
     { value: "15m", text: "15\u5206" },
     { value: "30m", text: "30\u5206" },
@@ -7337,7 +7335,22 @@
     timeScale: {
       timeVisible: true,
       secondsVisible: false,
-      borderColor: "#555555"
+      borderColor: "#555555",
+      localization: {
+        timeFormatter: (timestamp) => {
+          const date = new Date(timestamp * 1e3);
+          const month = date.getMonth() + 1;
+          const day = date.getDate();
+          const isIntraday = currentInterval.includes("m") || currentInterval.includes("h");
+          if (isIntraday) {
+            const hours = date.getHours().toString().padStart(2, "0");
+            const minutes = date.getMinutes().toString().padStart(2, "0");
+            return `${month}\u6708${day}\u65E5 ${hours}:${minutes}`;
+          } else {
+            return `${month}\u6708${day}\u65E5`;
+          }
+        }
+      }
     }
   };
   function createChart(container, options = {}) {
@@ -7473,6 +7486,7 @@
         crosshairMarkerVisible: false,
         priceLineVisible: false,
         lastValueVisible: false,
+        // Enable last value label
         visible: areEmaVisible
       });
       emaSeries.setData(emaDataArray[index]);
@@ -7595,6 +7609,7 @@
             crosshairMarkerVisible: false,
             priceLineVisible: false,
             lastValueVisible: false,
+            // Enable last value label
             visible: areEmaVisible
           });
           emaSeries.setData(emaDataArray[index]);
@@ -7715,24 +7730,89 @@
         emailList.innerHTML = "";
         if (emails.length === 0) {
           const li2 = document.createElement("li");
-          li2.textContent = "No emails subscribed.";
+          li2.textContent = "\u767B\u9332\u3055\u308C\u3066\u3044\u308B\u30E1\u30FC\u30EB\u30A2\u30C9\u30EC\u30B9\u306F\u3042\u308A\u307E\u305B\u3093\u3002";
           emailList.appendChild(li2);
         } else {
           emails.forEach((item) => {
             const li2 = document.createElement("li");
             li2.textContent = item.email;
+            li2.classList.add("email-list-item");
+            const deleteButton = document.createElement("button");
+            deleteButton.textContent = "\u524A\u9664";
+            deleteButton.classList.add("delete-email-button");
+            deleteButton.dataset.email = item.email;
+            deleteButton.addEventListener("click", async (event) => {
+              event.stopPropagation();
+              const emailToDelete = event.target.dataset.email;
+              await deleteEmail(emailToDelete);
+              await refreshEmailList();
+            });
+            li2.appendChild(deleteButton);
             emailList.appendChild(li2);
           });
         }
         emailListPanel.classList.remove("hidden");
       } catch (error) {
         console.error("Failed to fetch emails:", error);
-        statusMessage.textContent = "Failed to load email list.";
+        statusMessage.textContent = "\u30E1\u30FC\u30EB\u30EA\u30B9\u30C8\u306E\u8AAD\u307F\u8FBC\u307F\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002";
       }
     } else {
       emailListPanel.classList.add("hidden");
     }
   });
+  async function deleteEmail(email) {
+    statusMessage.textContent = `\u30E1\u30FC\u30EB\u30A2\u30C9\u30EC\u30B9 ${email} \u3092\u524A\u9664\u4E2D...`;
+    try {
+      const response = await fetch(`/api/emails/${email}`, {
+        method: "DELETE"
+      });
+      const result = await response.json();
+      if (response.ok) {
+        statusMessage.textContent = result.message;
+      } else {
+        throw new Error(result.error || "\u524A\u9664\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002");
+      }
+    } catch (error) {
+      console.error("Email deletion error:", error);
+      statusMessage.textContent = error.message;
+    }
+  }
+  async function refreshEmailList() {
+    try {
+      const response = await fetch("/api/emails");
+      if (!response.ok) {
+        throw new Error("Could not fetch email list.");
+      }
+      const emails = await response.json();
+      emailList.innerHTML = "";
+      if (emails.length === 0) {
+        const li2 = document.createElement("li");
+        li2.textContent = "\u767B\u9332\u3055\u308C\u3066\u3044\u308B\u30E1\u30FC\u30EB\u30A2\u30C9\u30EC\u30B9\u306F\u3042\u308A\u307E\u305B\u3093\u3002";
+        emailList.appendChild(li2);
+      } else {
+        emails.forEach((item) => {
+          const li2 = document.createElement("li");
+          li2.textContent = item.email;
+          li2.classList.add("email-list-item");
+          const deleteButton = document.createElement("button");
+          deleteButton.textContent = "\u524A\u9664";
+          deleteButton.classList.add("delete-email-button");
+          deleteButton.dataset.email = item.email;
+          deleteButton.addEventListener("click", async (event) => {
+            event.stopPropagation();
+            const emailToDelete = event.target.dataset.email;
+            await deleteEmail(emailToDelete);
+            await refreshEmailList();
+          });
+          li2.appendChild(deleteButton);
+          emailList.appendChild(li2);
+        });
+      }
+    } catch (error) {
+      console.error("Failed to refresh email list:", error);
+      statusMessage.textContent = "\u30E1\u30FC\u30EB\u30EA\u30B9\u30C8\u306E\u66F4\u65B0\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002";
+    }
+  }
   stockToggle.addEventListener("click", () => {
     currentDataType = "stock";
     stockToggle.classList.add("active");

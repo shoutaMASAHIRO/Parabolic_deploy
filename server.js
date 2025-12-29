@@ -79,6 +79,28 @@ app.get('/api/emails', async (req, res) => {
     }
 });
 
+// New endpoint to delete an email
+app.delete('/api/emails/:email', async (req, res) => {
+    const { email } = req.params;
+
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+        return res.status(400).json({ error: 'Please provide a valid email address.' });
+    }
+
+    try {
+        const result = await pool.query('DELETE FROM emails WHERE email = $1 RETURNING email', [email]);
+
+        if (result.rowCount > 0) {
+            return res.status(200).json({ message: `Email ${email} deleted successfully.` });
+        } else {
+            return res.status(404).json({ error: `Email ${email} not found.` });
+        }
+    } catch (error) {
+        console.error('Database deletion error:', error);
+        return res.status(500).json({ error: 'An internal server error occurred.' });
+    }
+});
+
 
 app.get('/api/data', async (req, res) => {
         const { ticker, interval } = req.query;

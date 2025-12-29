@@ -118,7 +118,6 @@ async function refreshChartData() {
 
 // --- Interval Options ---
 const stockIntervalOptions = [
-    { value: '1m', text: '1分' },
     { value: '5m', text: '5分' },
     { value: '15m', text: '15分' },
     { value: '30m', text: '30分' },
@@ -130,7 +129,6 @@ const stockIntervalOptions = [
 // Note: For USD/JPY, intraday intervals might not be reliably available from Yahoo Finance.
 // We'll restrict to generally available intervals to avoid "Invalid interval" errors.
 const usdJpyIntervalOptions = [
-    { value: '1m', text: '1分' },
     { value: '5m', text: '5分' },
     { value: '15m', text: '15分' },
     { value: '30m', text: '30分' },
@@ -171,6 +169,22 @@ const chartLayoutOptions = {
         timeVisible: true,
         secondsVisible: false,
         borderColor: '#555555',
+        localization: {
+            timeFormatter: (timestamp) => {
+                const date = new Date(timestamp * 1000);
+                const month = date.getMonth() + 1;
+                const day = date.getDate();
+                const isIntraday = currentInterval.includes('m') || currentInterval.includes('h');
+
+                if (isIntraday) {
+                    const hours = date.getHours().toString().padStart(2, '0');
+                    const minutes = date.getMinutes().toString().padStart(2, '0');
+                    return `${month}月${day}日 ${hours}:${minutes}`;
+                } else {
+                    return `${month}月${day}日`;
+                }
+            },
+        },
     },
 };
 
@@ -379,7 +393,7 @@ async function renderChartForTicker(ticker, interval) {
             title: `EMA ${emaConfig.period}`,
             crosshairMarkerVisible: false,
             priceLineVisible: false,
-            lastValueVisible: false,
+            lastValueVisible: false, // Enable last value label
             visible: areEmaVisible
         });
         emaSeries.setData(emaDataArray[index]);
@@ -538,7 +552,7 @@ async function renderChartForUsdJpy(interval) {
                     title: `EMA ${emaConfig.period}`,
                     crosshairMarkerVisible: false,
                     priceLineVisible: false,
-                    lastValueVisible: false,
+                    lastValueVisible: false, // Enable last value label
                     visible: areEmaVisible
                 });
                 emaSeries.setData(emaDataArray[index]);
@@ -689,25 +703,109 @@ toggleEmailListButton.addEventListener('click', async () => {
 
             if (emails.length === 0) {
                 const li = document.createElement('li');
-                li.textContent = 'No emails subscribed.';
+                li.textContent = '登録されているメールアドレスはありません。';
                 emailList.appendChild(li);
             } else {
                 emails.forEach(item => {
                     const li = document.createElement('li');
-                    li.textContent = item.email;
+                    li.textContent = item.email; // Display email text
+                    li.classList.add('email-list-item'); // Add class for styling
+
+                    const deleteButton = document.createElement('button');
+                    deleteButton.textContent = '削除';
+                    deleteButton.classList.add('delete-email-button');
+                    deleteButton.dataset.email = item.email; // Store email for deletion
+                    
+                    deleteButton.addEventListener('click', async (event) => {
+                        event.stopPropagation(); // Prevent toggling the panel
+                        const emailToDelete = event.target.dataset.email;
+                        await deleteEmail(emailToDelete);
+                        // Re-fetch and re-render the list after deletion
+                        await refreshEmailList();
+                    });
+                    
+                    li.appendChild(deleteButton);
                     emailList.appendChild(li);
                 });
             }
             emailListPanel.classList.remove('hidden');
         } catch (error) {
             console.error('Failed to fetch emails:', error);
-            statusMessage.textContent = 'Failed to load email list.';
+            statusMessage.textContent = 'メールリストの読み込みに失敗しました。';
         }
     } else {
         emailListPanel.classList.add('hidden');
     }
 });
 
+/**
+ * Deletes an email from the database.
+ * @param {string} email The email to delete.
+ */
+async function deleteEmail(email) {
+    statusMessage.textContent = `メールアドレス ${email} を削除中...`;
+    try {
+        const response = await fetch(`/api/emails/${email}`, {
+            method: 'DELETE',
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            statusMessage.textContent = result.message;
+        } else {
+            throw new Error(result.error || '削除に失敗しました。');
+        }
+    } catch (error) {
+        console.error('Email deletion error:', error);
+        statusMessage.textContent = error.message;
+    }
+}
+
+/**
+ * Refreshes the email list in the UI.
+ */
+async function refreshEmailList() {
+    try {
+        const response = await fetch('/api/emails');
+        if (!response.ok) {
+            throw new Error('Could not fetch email list.');
+        }
+        const emails = await response.json();
+        
+        emailList.innerHTML = ''; // Clear previous list
+
+        if (emails.length === 0) {
+            const li = document.createElement('li');
+            li.textContent = '登録されているメールアドレスはありません。';
+            emailList.appendChild(li);
+        } else {
+            emails.forEach(item => {
+                const li = document.createElement('li');
+                li.textContent = item.email;
+                li.classList.add('email-list-item');
+
+                const deleteButton = document.createElement('button');
+                deleteButton.textContent = '削除';
+                deleteButton.classList.add('delete-email-button');
+                deleteButton.dataset.email = item.email;
+                
+                deleteButton.addEventListener('click', async (event) => {
+                    event.stopPropagation();
+                    const emailToDelete = event.target.dataset.email;
+                    await deleteEmail(emailToDelete);
+                    await refreshEmailList(); // Re-fetch and re-render after deletion
+                });
+                
+                li.appendChild(deleteButton);
+                emailList.appendChild(li);
+            });
+        }
+    } catch (error) {
+        console.error('Failed to refresh email list:', error);
+        statusMessage.textContent = 'メールリストの更新に失敗しました。';
+    }
+}
 
 stockToggle.addEventListener('click', () => {
     currentDataType = 'stock';

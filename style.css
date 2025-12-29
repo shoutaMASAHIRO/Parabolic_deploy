@@ -56,7 +56,7 @@ label {
 input[type="text"],
 input[type="number"],
 select {
-    background-color: transparent;
+    background-color: var(--pane-color); /* Explicitly set background for select */
     color: var(--text-color);
     border: none;
     border-bottom: 1px solid var(--border-color);
@@ -65,6 +65,11 @@ select {
     font-size: 1rem;
     text-align: center;
     width: 80px; /* Give a consistent width */
+}
+
+select option {
+    background-color: var(--pane-color); /* Ensure options are also dark */
+    color: var(--text-color);
 }
 
 input:focus, select:focus {
@@ -226,10 +231,29 @@ main {
 #email-list li {
     padding: 0.5rem 0.75rem;
     border-bottom: 1px solid var(--border-color);
+    display: flex; /* Use flexbox for alignment */
+    justify-content: space-between; /* Space between email and button */
+    align-items: center; /* Vertically center items */
 }
 
 #email-list li:last-child {
     border-bottom: none;
+}
+
+.delete-email-button {
+    background-color: #dc3545; /* Red color for delete */
+    border-color: #dc3545;
+    color: white;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.delete-email-button:hover {
+    background-color: #c82333;
+    border-color: #c82333;
+    opacity: 1;
 }
 
 
@@ -286,7 +310,16 @@ main {
     color: #121212; /* Dark text for yellow button */
 }
 
-#toggle-bb-button:hover, #toggle-ema-button:hover, #toggle-settings-button:hover {
+#toggle-bb-button:hover, #toggle-ema-button:hover {
+    opacity: 0.9;
+}
+
+#toggle-settings-button {
+    background-color: var(--accent-color);
+    border-color: var(--accent-color);
+}
+
+#toggle-settings-button:hover {
     opacity: 0.9;
 }
 
