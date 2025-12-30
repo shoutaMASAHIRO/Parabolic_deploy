@@ -2,9 +2,52 @@ const express = require('express');
 const yahooFinance = require('yahoo-finance2').default;
 const cors = require('cors');
 const { Pool } = require('pg');
+const { SSMClient, GetParametersCommand } = require("@aws-sdk/client-ssm");
+
+let transporter;
+
+// This function fetches credentials from AWS Parameter Store and configures Nodemailer
+async function configureNodemailer() {
+    try {
+        const ssmClient = new SSMClient({ region: process.env.AWS_REGION || "ap-northeast-1" }); // Default to Tokyo region if not set
+        const command = new GetParametersCommand({
+            Names: [
+                '/parabolic/gmail/user',
+                '/parabolic/gmail/pass'
+            ],
+            WithDecryption: true
+        });
+
+        const { Parameters } = await ssmClient.send(command);
+
+        const gmailUser = Parameters.find(p => p.Name === '/parabolic/gmail/user').Value;
+        const gmailPass = Parameters.find(p => p.Name === '/parabolic/gmail/pass').Value;
+
+        if (!gmailUser || !gmailPass) {
+            throw new Error("Gmail credentials not found in Parameter Store.");
+        }
+
+        // Create the Nodemailer transporter with the fetched credentials
+        transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+                user: gmailUser,
+                pass: gmailPass,
+            },
+        });
+
+        console.log("Nodemailer configured successfully with credentials from Parameter Store.");
+
+    } catch (error) {
+        console.error("Failed to configure Nodemailer from Parameter Store:", error);
+        // In a production environment, you might want to handle this more gracefully,
+        // for example, by preventing the app from starting or sending an alert.
+    }
+}
 
 const app = express();
 const port = 3000;
+
 
 // --- Database Setup ---
 const pool = new Pool({
@@ -100,6 +143,39 @@ app.delete('/api/emails/:email', async (req, res) => {
         return res.status(500).json({ error: 'An internal server error occurred.' });
     }
 });
+
+app.post('/api/send-emails', async (req, res) => {
+    if (!transporter) {
+        return res.status(500).json({ error: 'Email service is not configured. Please check the server logs.' });
+    }
+
+    try {
+        const result = await pool.query('SELECT email FROM emails');
+        const emails = result.rows.map(row => row.email);
+
+        if (emails.length === 0) {
+            return res.status(404).json({ message: 'No emails found to send.' });
+        }
+
+        const mailOptions = {
+            from: process.env.GMAIL_USER,
+            subject: '条件達成',
+            text: 'おめでとうございます。条件達成です。',
+            html: '<p>おめでとうございます。条件達成です。</p>'
+        };
+
+        for (const email of emails) {
+            await transporter.sendMail({ ...mailOptions, to: email });
+            console.log(`Email sent to ${email}`);
+        }
+
+        res.status(200).json({ message: 'Emails sent successfully.' });
+    } catch (error) {
+        console.error('Error sending emails:', error);
+        res.status(500).json({ error: 'An internal server error occurred while sending emails.' });
+    }
+});
+
 
 
 app.get('/api/data', async (req, res) => {
@@ -270,10 +346,17 @@ app.get('/api/usd_jpy_data', async (req, res) => {
     }
 });
 
-// Start the server and create table
-app.listen(port, '0.0.0.0', () => {
-    console.log(`Proxy server listening at http://0.0.0.0:${port}`);
-    console.log('API endpoint for stocks: /api/data?ticker=7203.T&interval=1d');
-    console.log('API endpoint for USD/JPY: /api/usd_jpy_data');
-    createEmailsTable();
-});
+// --- Server Startup ---
+async function startServer() {
+    // Configure email service before starting the server
+    await configureNodemailer();
+
+    app.listen(port, '0.0.0.0', () => {
+        console.log(`Proxy server listening at http://0.0.0.0:${port}`);
+        console.log('API endpoint for stocks: /api/data?ticker=7203.T&interval=1d');
+        console.log('API endpoint for USD/JPY: /api/usd_jpy_data');
+        createEmailsTable();
+    });
+}
+
+startServer();

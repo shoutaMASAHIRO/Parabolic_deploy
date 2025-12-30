@@ -7813,6 +7813,23 @@
       statusMessage.textContent = "\u30E1\u30FC\u30EB\u30EA\u30B9\u30C8\u306E\u66F4\u65B0\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002";
     }
   }
+  var sendEmailButton = document.getElementById("send-email-button");
+  sendEmailButton.addEventListener("click", async () => {
+    statusMessage.textContent = "\u30E1\u30FC\u30EB\u3092\u9001\u4FE1\u3057\u3066\u3044\u307E\u3059...";
+    try {
+      const response = await fetch("/api/send-emails", {
+        method: "POST"
+      });
+      const result = await response.json();
+      if (response.ok) {
+        statusMessage.textContent = result.message;
+      } else {
+        throw new Error(result.error || "\u30E1\u30FC\u30EB\u306E\u9001\u4FE1\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002");
+      }
+    } catch (error) {
+      statusMessage.textContent = error.message;
+    }
+  });
   stockToggle.addEventListener("click", () => {
     currentDataType = "stock";
     stockToggle.classList.add("active");

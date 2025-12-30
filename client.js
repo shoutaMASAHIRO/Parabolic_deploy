@@ -807,6 +807,27 @@ async function refreshEmailList() {
     }
 }
 
+const sendEmailButton = document.getElementById('send-email-button');
+
+sendEmailButton.addEventListener('click', async () => {
+    statusMessage.textContent = 'メールを送信しています...';
+    try {
+        const response = await fetch('/api/send-emails', {
+            method: 'POST',
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            statusMessage.textContent = result.message;
+        } else {
+            throw new Error(result.error || 'メールの送信に失敗しました。');
+        }
+    } catch (error) {
+        statusMessage.textContent = error.message;
+    }
+});
+
 stockToggle.addEventListener('click', () => {
     currentDataType = 'stock';
     stockToggle.classList.add('active');
