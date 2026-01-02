@@ -7,12 +7,14 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <div id="cross-notification" class="hidden"></div>
     <div class="toggle-container">
         <button id="stockToggle" class="active">株価</button>
         <button id="usdJpyToggle">ドル円</button>
 
         <div class="email-list-container">
             <button id="toggle-email-list-button">登録済みメール</button>
+            <button id="send-email-button">メール送信</button>
             <div id="email-list-panel" class="hidden">
                 <ul id="email-list">
                     <!-- Emails will be populated here -->
@@ -20,6 +22,26 @@
             </div>
         </div>
     </div>
+
+    <!-- START: Added Authentication UI -->
+    <div id="auth-ui" class="auth-controls">
+        <span id="user-info" class="hidden"></span>
+        <!-- New X Value Controls -->
+        <div id="x-value-controls" class="hidden">
+            <span id="current-x-value">現在のX値: --</span>
+            <div class="input-group">
+                <label for="x-value-input">X値を編集:</label>
+                <input type="text" id="x-value-input" value="0">
+                <button id="save-x-value-button">保存</button>
+            </div>
+        </div>
+        <!-- End New X Value Controls -->
+        <button id="login-button" onclick="location.href='login.html'" class="hidden">ログイン</button>
+        <button id="register-button" onclick="location.href='register.html'" class="hidden">新規登録</button>
+        <button id="logout-button" class="hidden">ログアウト</button>
+    </div>
+    <!-- END: Added Authentication UI -->
+
     <header>
         
         <div id="controls">
@@ -53,6 +75,10 @@
                 <div class="input-group">
                     <label for="bb-period">BB期間</label>
                     <input type="number" id="bb-period" value="20">
+                </div>
+                <div class="input-group">
+                    <label for="bb-stddev">BB標準偏差</label>
+                    <input type="number" id="bb-stddev" value="2" step="0.5">
                 </div>
                 <div class="input-group">
                     <label for="ema1-period">EMA 1期間</label>

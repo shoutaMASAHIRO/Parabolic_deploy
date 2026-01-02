@@ -214,11 +214,13 @@ main {
     background-color: var(--pane-color);
     border: 1px solid var(--border-color);
     border-radius: 8px;
-    width: 300px;
+    width: max-content; /* Adjust width to content */
+    min-width: 250px;   /* Set a minimum width */
     max-height: 400px;
     overflow-y: auto;
     z-index: 1002;
     margin-top: 0.5rem;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
 }
 
 #email-list {
@@ -229,31 +231,54 @@ main {
 }
 
 #email-list li {
-    padding: 0.5rem 0.75rem;
+    padding: 0.75rem;
     border-bottom: 1px solid var(--border-color);
-    display: flex; /* Use flexbox for alignment */
-    justify-content: space-between; /* Space between email and button */
-    align-items: center; /* Vertically center items */
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: background-color 0.2s ease;
+}
+
+#email-list li:hover {
+    background-color: #2a2a2e;
 }
 
 #email-list li:last-child {
     border-bottom: none;
 }
 
+.email-item-buttons {
+    display: flex;
+    gap: 0.5rem;
+    margin-left: 1rem; /* Added spacing to the left of the button group */
+}
+
+.condition-settings-button,
+.delete-email-button {
+    border: none;
+    color: white;
+    padding: 0.3rem 0.7rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.condition-settings-button {
+    background-color: var(--accent-color);
+}
+
 .delete-email-button {
     background-color: #dc3545; /* Red color for delete */
-    border-color: #dc3545;
-    color: white;
-    padding: 0.2rem 0.6rem;
-    font-size: 0.75rem;
-    border-radius: 4px;
-    cursor: pointer;
+}
+
+.condition-settings-button:hover {
+    background-color: #3a56c0; /* Darker blue for hover */
 }
 
 .delete-email-button:hover {
-    background-color: #c82333;
-    border-color: #c82333;
-    opacity: 1;
+    background-color: #b02a30; /* Darker red for hover */
 }
 
 
@@ -350,4 +375,158 @@ main {
     header {
         padding: 1rem;
     }
+}
+
+/* --- Cross Notification --- */
+#cross-notification {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: #ffc107; /* A bright, attention-grabbing color */
+    color: #000;
+    padding: 15px 30px;
+    border-radius: 8px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+    font-size: 1.5rem;
+    font-weight: bold;
+    z-index: 2000;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.5s, visibility 0.5s;
+}
+
+#cross-notification:not(.hidden) {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* Indicator Values Display */
+.bb-values, .ema-values {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); /* Responsive grid */
+    gap: 0.5rem;
+    padding: 0.75rem;
+    margin-top: 1rem;
+    background-color: #0a0a0a;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.ema-values {
+    grid-template-columns: repeat(3, 1fr); /* EMA always has 3 items */
+    margin-top: 0.5rem;
+}
+
+.indicator-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0.5rem;
+    background-color: #1c1c1e;
+    border-radius: 6px;
+    text-align: center;
+}
+
+.indicator-item span:first-child {
+    font-size: 0.75rem;
+    color: var(--label-color);
+    margin-bottom: 0.25rem;
+    text-transform: uppercase;
+}
+
+.indicator-item span:last-child {
+    font-size: 1.1rem;
+    font-weight: 600;
+    font-family: 'Courier New', Courier, monospace;
+    color: var(--text-color);
+}
+
+/* Cross History Display */
+.cross-history {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); /* Responsive grid */
+    gap: 0.5rem;
+    padding: 0.75rem;
+    margin-top: 0.5rem;
+    background-color: #0a0a0a;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.indicator-group-title {
+    grid-column: 1 / -1; /* Span across all columns */
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--accent-color); /* Highlight color */
+    text-align: center;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px dashed var(--border-color);
+    margin-bottom: 0.5rem;
+}
+
+.cross-item-container {
+    display: contents; /* Allows children to be grid items */
+}
+
+/* Cross Reset Settings */
+.cross-reset-settings {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    margin-top: 1rem;
+    background-color: #1a1a1a;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    font-size: 0.9rem;
+    color: var(--label-color);
+}
+
+.cross-reset-settings input[type="number"] {
+    width: auto;
+    flex-grow: 1;
+    text-align: left;
+    padding: 0.4rem 0.8rem;
+    border-radius: 4px;
+    background-color: var(--pane-color);
+    border: 1px solid var(--border-color);
+}
+
+#apply-cross-reset-button {
+    background-color: var(--accent-color);
+    border-color: var(--accent-color);
+    color: var(--text-color);
+    padding: 0.4rem 0.8rem;
+    font-weight: normal; /* Less bold than main action buttons */
+}
+
+#apply-cross-reset-button:hover {
+    opacity: 0.9;
+}
+
+
+/* Current Price Display */
+.current-price-values {
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.5rem 1rem;
+    margin-bottom: 0.5rem;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.current-price-values .price-large {
+    font-size: 1.75rem;
+    font-weight: 700;
+}
+
+.current-price-values .price-up {
+    color: var(--up-color);
+}
+
+.current-price-values .price-down {
+    color: var(--down-color);
 }
