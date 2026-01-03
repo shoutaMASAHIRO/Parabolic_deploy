@@ -10629,9 +10629,7 @@
   var ema2PeriodInput = document.getElementById("ema2-period");
   var ema3PeriodInput = document.getElementById("ema3-period");
   var applyIndicatorsButton = document.getElementById("apply-indicators-button");
-  var toggleSettingsButton = document.getElementById("toggle-settings-button");
   var indicatorSettings = document.getElementById("indicator-settings");
-  var toggleSubscribeButton = document.getElementById("toggle-subscribe-button");
   var subscribeSettings = document.getElementById("subscribe-settings");
   var emailInput = document.getElementById("email-input");
   var subscribeButton = document.getElementById("subscribe-button");
@@ -11148,10 +11146,12 @@
             <div class="cross-history" id="cross-history-usdjpy"></div>
             <div class="cross-history" id="ema-cross-history-usdjpy"></div>
             <div class="cross-reset-settings">
-                <span id="current-send-condition-threshold-display">\u73FE\u5728\u306E\u9001\u4FE1\u6761\u4EF6: --</span>
-                <label for="cross-reset-threshold-input">\u9001\u4FE1\u6761\u4EF6 (\xB1\u5186):</label>
-                <input type="number" id="cross-reset-threshold-input" step="0.001" min="0.01">
-                <button id="apply-cross-reset-button">\u9069\u7528</button>
+                <label for="cross-reset-threshold-input" class="form-label">\u9001\u4FE1\u6761\u4EF6 (\xB1\u5186)</label>
+                <span id="current-send-condition-threshold-display" class="value-display">\u73FE\u5728\u306E\u9001\u4FE1\u6761\u4EF6: --</span>
+                <div class="input-group">
+                    <input type="number" id="cross-reset-threshold-input" class="form-input" step="0.001" min="0.01">
+                    <button id="apply-cross-reset-button" class="btn btn-secondary">\u9069\u7528</button>
+                </div>
             </div>
         `;
       chartsContainer.appendChild(wrapper);
@@ -11345,15 +11345,14 @@
     toggleEmaVisibility();
     saveUserSettings();
   });
+  applyIndicatorsButton.addEventListener("click", () => {
+    start(currentDataType);
+    saveUserSettings();
+    sendBbSettingsToServer();
+  });
   intervalSelect.addEventListener("change", () => {
     currentInterval = intervalSelect.value;
     saveUserSettings();
-  });
-  toggleSettingsButton.addEventListener("click", () => {
-    indicatorSettings.classList.toggle("hidden");
-  });
-  toggleSubscribeButton.addEventListener("click", () => {
-    subscribeSettings.classList.toggle("hidden");
   });
   subscribeButton.addEventListener("click", async () => {
     const email = emailInput.value;
@@ -11373,9 +11372,6 @@
         statusMessage.textContent = result.message;
         emailInput.value = "";
         await refreshEmailList();
-        setTimeout(() => {
-          subscribeSettings.classList.add("hidden");
-        }, 1500);
       } else {
         throw new Error(result.error || "\u767B\u9332\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002");
       }
@@ -11426,13 +11422,7 @@
           emailSpan.textContent = item.email;
           li2.appendChild(emailSpan);
           li2.classList.add("email-list-item");
-          const buttonsContainer = document.createElement("div");
-          buttonsContainer.classList.add("email-item-buttons");
           if (currentUserEmail && item.email === currentUserEmail) {
-            const settingsButton = document.createElement("button");
-            settingsButton.textContent = "\u6761\u4EF6\u8A2D\u5B9A";
-            settingsButton.classList.add("condition-settings-button");
-            buttonsContainer.appendChild(settingsButton);
             const deleteButton = document.createElement("button");
             deleteButton.textContent = "\u524A\u9664";
             deleteButton.classList.add("delete-email-button");
@@ -11442,9 +11432,8 @@
               const emailToDelete = event.target.dataset.email;
               await deleteEmail(emailToDelete);
             });
-            buttonsContainer.appendChild(deleteButton);
+            li2.appendChild(deleteButton);
           }
-          li2.appendChild(buttonsContainer);
           emailList.appendChild(li2);
         });
       }
@@ -11670,7 +11659,6 @@
     socket = lookup2(`${window.location.protocol}//${window.location.hostname}:3000`);
     socket.on("connect", () => {
       console.log("Connected to WebSocket server!");
-      sendBbSettingsToServer();
     });
     socket.on("bb_cross", async (data) => {
       console.log("BB Cross event received:", data);
@@ -11706,21 +11694,9 @@
       checkAndResetCrossPrices();
     });
   });
-  function sendBbSettingsToServer() {
-    if (socket && socket.connected) {
-      const bbPeriod = parseInt(bbPeriodInput.value, 10);
-      const bbStdDev = parseFloat(bbStdDevInput.value);
-      if (!isNaN(bbPeriod) && !isNaN(bbStdDev)) {
-        socket.emit("update_bb_settings", { bbPeriod, bbStdDev });
-        console.log("Sent BB settings to server:", { bbPeriod, bbStdDev });
-      }
-    }
-  }
   applyIndicatorsButton.addEventListener("click", () => {
     start(currentDataType);
-    indicatorSettings.classList.add("hidden");
     saveUserSettings();
-    sendBbSettingsToServer();
   });
 })();
 /*! Bundled license information:

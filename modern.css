@@ -1,0 +1,577 @@
+/* --- Root Variables --- */
+:root {
+    --bg-primary: #121212;
+    --bg-secondary: #1e1e1e;
+    --bg-tertiary: #2a2a2a;
+    --text-primary: #e0e0e0;
+    --text-secondary: #a0a0a0;
+    --accent-primary: #42a5f5; /* A softer, lighter blue */
+    --accent-primary-hover: #1e88e5;
+    --accent-primary-transparent: rgba(66, 165, 245, 0.2);
+    --border-color: #3a3a3a;
+    --error-color: #cf6679; /* Material Design error color for dark themes */
+    --error-color-hover: #b00020;
+    --success-color: #4caf50;
+    --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --border-radius: 8px;
+}
+
+/* --- General Reset & Body --- */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: var(--font-family);
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    /* display, justify-content, align-items are set for auth pages, will be overridden by app-grid-container */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    overflow: hidden; /* Prevent body scroll when app grid is active */
+}
+
+/* --- Authentication Page Layout (for login.html, register.html) --- */
+.auth-wrapper {
+    width: 100%;
+    max-width: 420px;
+    padding: 20px;
+}
+
+.auth-container {
+    background-color: var(--bg-secondary);
+    padding: 40px;
+    border-radius: var(--border-radius);
+    border: 1px solid var(--border-color);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+    text-align: center;
+}
+
+.auth-title {
+    font-size: 2rem;
+    font-weight: 600;
+    margin-bottom: 30px;
+    color: var(--text-primary);
+}
+
+.auth-links {
+    margin-top: 25px;
+}
+
+.auth-links p {
+    color: var(--text-secondary);
+    margin-bottom: 15px;
+}
+
+.auth-links a {
+    color: var(--accent-primary);
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.auth-links a:hover {
+    text-decoration: underline;
+}
+
+/* --- Main App Layout (for index.html) --- */
+.app-grid-container {
+    display: grid;
+    grid-template-areas:
+        "header header"
+        "sidebar main"
+        "footer footer";
+    grid-template-columns: 280px 1fr; /* Fixed sidebar width */
+    grid-template-rows: auto 1fr auto;
+    height: 100vh;
+    width: 100vw;
+}
+
+body > .app-grid-container {
+    display: grid; /* Ensure this overrides the flex settings on body */
+}
+
+
+.app-header {
+    grid-area: header;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 24px;
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    height: 64px;
+    flex-shrink: 0;
+}
+
+.app-sidebar {
+    grid-area: sidebar;
+    background-color: var(--bg-secondary);
+    border-right: 1px solid var(--border-color);
+    padding: 24px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+.app-main {
+    grid-area: main;
+    padding: 24px;
+    overflow-y: auto;
+    background-color: var(--bg-primary);
+}
+
+.app-footer {
+    grid-area: footer;
+    padding: 8px 24px;
+    background-color: var(--bg-secondary);
+    border-top: 1px solid var(--border-color);
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    text-align: center;
+    flex-shrink: 0;
+}
+
+/* --- Header Elements --- */
+.app-header .header-left, .app-header .header-center, .app-header .header-right {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.app-title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.header-controls {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+}
+
+.auth-controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+#user-info {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+/* --- General Form & Control Elements --- */
+.form-group {
+    margin-bottom: 20px;
+    text-align: left;
+}
+
+.form-label, .input-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+.input-group label {
+    margin-bottom: 0;
+}
+
+.form-input, .form-select {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background-color: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.form-input:focus, .form-select:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 3px var(--accent-primary-transparent);
+}
+
+.input-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.input-group.vertical {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+}
+/* Style for attached input and button */
+.cross-reset-settings .input-group {
+    gap: 8px; /* Added gap here */
+}
+.cross-reset-settings .input-group > .form-input {
+    /* Removed specific border-radius and border-right rules to allow gap */
+}
+.cross-reset-settings .input-group > .btn {
+    /* Removed specific border-radius rules to allow gap */
+}
+
+.input-group.vertical label, .input-group.vertical .value-display {
+    text-align: left;
+    margin-bottom: 4px;
+}
+#tickers-input {
+    width: 120px;
+}
+
+/* --- General Buttons --- */
+.btn {
+    display: inline-block;
+    width: auto;
+    padding: 12px 18px;
+    background-color: var(--accent-primary);
+    color: #ffffff;
+    border: none;
+    border-radius: var(--border-radius);
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-align: center;
+    text-decoration: none;
+    transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+}
+
+.btn:hover {
+    background-color: var(--accent-primary-hover);
+}
+
+.btn-primary {
+    background-color: var(--accent-primary);
+    border: 1px solid var(--accent-primary);
+}
+.btn-primary:hover {
+    background-color: var(--accent-primary-hover);
+    border-color: var(--accent-primary-hover);
+}
+
+.btn-secondary {
+    background-color: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+.btn-secondary:hover {
+    background-color: var(--accent-primary-transparent);
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+}
+
+.sidebar-card .btn {
+    width: 100%;
+}
+
+.toggle-buttons {
+    display: flex;
+}
+.toggle-buttons .toggle-button {
+    padding: 8px 16px;
+    font-size: 0.9rem;
+    background-color: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+.toggle-buttons .toggle-button:first-child {
+    border-top-left-radius: 6px;
+    border-bottom-left-radius: 6px;
+}
+.toggle-buttons .toggle-button:last-child {
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    border-left: none;
+}
+.toggle-buttons .toggle-button.active {
+    background-color: var(--accent-primary);
+    color: #fff;
+    border-color: var(--accent-primary);
+}
+
+/* --- Sidebar Cards --- */
+.sidebar-card {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+}
+.card-title {
+    font-size: 1rem;
+    font-weight: 600;
+    padding: 16px;
+    border-bottom: 1px solid var(--border-color);
+    margin: 0;
+}
+.card-content {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.value-display {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+.sidebar-card hr {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 0;
+}
+.indicator-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.email-list-container {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+#email-list-panel {
+    position: static;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    max-height: 200px;
+    overflow-y: auto;
+    background-color: var(--bg-primary);
+}
+#email-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+#email-list li {
+    padding: 12px 16px;
+    font-size: 0.9rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border-color);
+    transition: background-color 0.2s ease;
+    word-break: break-all; /* Prevent long emails from overflowing */
+}
+#email-list li:hover {
+    background-color: var(--bg-tertiary);
+}
+#email-list li:last-child {
+    border-bottom: none;
+}
+.email-list-item-empty {
+    text-align: center;
+    padding: 16px;
+    color: var(--text-secondary);
+}
+/* Removed .email-item-buttons as it's no longer used */
+
+.delete-email-button {
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid transparent;
+    font-size: 0.8rem;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-weight: 500;
+    margin-left: 16px; /* Add space between email and button */
+    flex-shrink: 0; /* Prevent button from shrinking */
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+.delete-email-button:hover {
+    background-color: var(--error-color);
+    color: #fff;
+    border-color: var(--error-color);
+}
+
+
+/* --- Main Chart Area --- */
+#charts-container {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+.chart-wrapper {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: 24px;
+}
+.chart-title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+}
+.chart-container {
+    width: 100%;
+    height: 50vh;
+    min-height: 350px;
+}
+.current-price-values, .bb-values, .ema-values, .cross-history {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding-top: 16px;
+}
+.indicator-item {
+    flex: 1;
+    min-width: 90px;
+    background-color: var(--bg-tertiary);
+    border-radius: 6px;
+    padding: 8px 12px;
+    text-align: center;
+}
+.indicator-item span:first-child {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+.indicator-item span:last-child {
+    display: block;
+    font-size: 1rem;
+    font-weight: 600;
+}
+.current-price-values .price-large {
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+.price-up { color: var(--success-color); }
+.price-down { color: var(--error-color); }
+
+.cross-reset-settings {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
+}
+
+/* --- Messages & Notifications --- */
+.message {
+    margin-top: 20px;
+    min-height: 24px;
+    color: var(--error-color);
+}
+
+#cross-notification {
+    position: fixed;
+    top: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: var(--accent-primary);
+    color: #fff;
+    padding: 12px 24px;
+    border-radius: var(--border-radius);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+    font-size: 1.2rem;
+    font-weight: 600;
+    z-index: 2000;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.5s, visibility 0.5s;
+}
+#cross-notification:not(.hidden) {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* --- Utilities --- */
+.hidden {
+    display: none !important;
+}
+
+/* --- Responsive Design (Tablet & Mobile) --- */
+@media (max-width: 992px) {
+    body {
+        overflow: auto; /* Allow body to scroll on mobile */
+    }
+
+    .app-grid-container {
+        grid-template-areas:
+            "header"
+            "main"
+            "sidebar"
+            "footer";
+        grid-template-columns: 1fr; /* Single column */
+        grid-template-rows: auto auto 1fr auto; /* Let rows size themselves */
+        height: auto;
+        min-height: 100vh;
+    }
+
+    .app-header {
+        flex-direction: column;
+        height: auto;
+        padding: 16px;
+        gap: 16px;
+    }
+    
+    .app-header .header-left, .app-header .header-center, .app-header .header-right {
+        width: 100%;
+        justify-content: center;
+    }
+    .app-header .header-left {
+        justify-content: space-between;
+    }
+    .app-header .header-right {
+        justify-content: flex-end;
+    }
+
+    .app-sidebar {
+        border-right: none;
+        border-top: 1px solid var(--border-color);
+    }
+    
+    .app-main {
+        padding: 16px;
+    }
+
+    .chart-container {
+        height: 60vh; /* Taller chart on mobile */
+    }
+}
+
+@media (max-width: 576px) {
+    .header-controls {
+        flex-direction: column;
+        align-items: stretch;
+        width: 100%;
+    }
+    #tickers-input {
+        width: 100%;
+    }
+
+    .auth-controls {
+        flex-direction: column;
+        align-items: stretch;
+        width: 100%;
+    }
+    .auth-controls .btn {
+        text-align: center;
+    }
+    
+    .app-header .header-left {
+        flex-direction: column;
+        gap: 16px;
+    }
+
+    /* Responsive override for cross-reset-settings */
+    .cross-reset-settings .input-group {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+    }
+    .cross-reset-settings .input-group > .form-input,
+    .cross-reset-settings .input-group > .btn {
+        border-radius: var(--border-radius);
+        border-right: 1px solid var(--border-color);
+    }
+}

@@ -3,105 +3,33 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>新規登録 - Parabolic</title>
-    <link rel="stylesheet" href="style.css">
-    <style>
-        body {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            background-color: #1a1a1a;
-            color: #ffffff;
-            font-family: 'Arial', sans-serif;
-        }
-        .register-container {
-            background-color: #2a2a2a;
-            padding: 40px;
-            border-radius: 8px;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-            text-align: center;
-            max-width: 400px;
-            width: 90%;
-        }
-        h1 {
-            color: #4CAF50;
-            margin-bottom: 30px;
-        }
-        .form-group {
-            margin-bottom: 20px;
-            text-align: left;
-        }
-        label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: bold;
-        }
-        input[type="text"],
-        input[type="password"],
-        input[type="email"] {
-            width: 100%;
-            padding: 12px;
-            border: 1px solid #444444;
-            border-radius: 4px;
-            background-color: #3a3a3a;
-            color: #ffffff;
-            box-sizing: border-box;
-        }
-        button {
-            width: 100%;
-            padding: 12px;
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 16px;
-            font-weight: bold;
-            transition: background-color 0.3s ease;
-        }
-        button:hover {
-            background-color: #45a049;
-        }
-        .message {
-            margin-top: 20px;
-            color: #f44336;
-        }
-        .links {
-            margin-top: 20px;
-        }
-        .links a {
-            color: #2196F3;
-            text-decoration: none;
-            margin: 0 10px;
-        }
-        .links a:hover {
-            text-decoration: underline;
-        }
-    </style>
+    <title>新規登録 - Parabolic Chart</title>
+    <link rel="stylesheet" href="modern.css">
 </head>
 <body>
-    <div class="register-container">
-        <h1>新規登録</h1>
-        <form id="register-form">
-            <div class="form-group">
-                <label for="email">メールアドレス:</label>
-                <input type="email" id="email" name="email" required>
+    <div class="auth-wrapper">
+        <div class="auth-container">
+            <h1 class="auth-title">新規登録</h1>
+            <form id="register-form">
+                <div class="form-group">
+                    <label for="email" class="form-label">メールアドレス</label>
+                    <input type="email" id="email" name="email" class="form-input" required>
+                </div>
+                <div class="form-group">
+                    <label for="username" class="form-label">ユーザー名</label>
+                    <input type="text" id="username" name="username" class="form-input" required>
+                </div>
+                <div class="form-group">
+                    <label for="password" class="form-label">パスワード</label>
+                    <input type="password" id="password" name="password" class="form-input" required>
+                </div>
+                <button type="submit" class="btn">登録</button>
+                <p id="message" class="message"></p>
+            </form>
+            <div class="auth-links">
+                <p>すでにアカウントをお持ちですか？ <a href="login.html">ログイン</a></p>
+                <p><a href="/">トップページに戻る</a></p>
             </div>
-            <div class="form-group">
-                <label for="username">ユーザー名:</label>
-                <input type="text" id="username" name="username" required>
-            </div>
-            <div class="form-group">
-                <label for="password">パスワード:</label>
-                <input type="password" id="password" name="password" required>
-            </div>
-            <button type="submit">登録</button>
-            <p id="message" class="message"></p>
-        </form>
-        <div class="links">
-            <p>すでにアカウントをお持ちですか？ <a href="login.html">ログイン</a></p>
-            <p><a href="/">トップページに戻る</a></p>
         </div>
     </div>
     <script src="dist/auth.js"></script>

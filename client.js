@@ -19,9 +19,7 @@ const ema1PeriodInput = document.getElementById('ema1-period');
 const ema2PeriodInput = document.getElementById('ema2-period');
 const ema3PeriodInput = document.getElementById('ema3-period');
 const applyIndicatorsButton = document.getElementById('apply-indicators-button');
-const toggleSettingsButton = document.getElementById('toggle-settings-button');
 const indicatorSettings = document.getElementById('indicator-settings');
-const toggleSubscribeButton = document.getElementById('toggle-subscribe-button');
 const subscribeSettings = document.getElementById('subscribe-settings');
 const emailInput = document.getElementById('email-input');
 const subscribeButton = document.getElementById('subscribe-button');
@@ -664,10 +662,12 @@ async function renderChartForUsdJpy(interval) {
             <div class="cross-history" id="cross-history-usdjpy"></div>
             <div class="cross-history" id="ema-cross-history-usdjpy"></div>
             <div class="cross-reset-settings">
-                <span id="current-send-condition-threshold-display">現在の送信条件: --</span>
-                <label for="cross-reset-threshold-input">送信条件 (±円):</label>
-                <input type="number" id="cross-reset-threshold-input" step="0.001" min="0.01">
-                <button id="apply-cross-reset-button">適用</button>
+                <label for="cross-reset-threshold-input" class="form-label">送信条件 (±円)</label>
+                <span id="current-send-condition-threshold-display" class="value-display">現在の送信条件: --</span>
+                <div class="input-group">
+                    <input type="number" id="cross-reset-threshold-input" class="form-input" step="0.001" min="0.01">
+                    <button id="apply-cross-reset-button" class="btn btn-secondary">適用</button>
+                </div>
             </div>
         `;
     chartsContainer.appendChild(wrapper);
@@ -911,24 +911,16 @@ toggleEmaButton.addEventListener('click', () => {
   saveUserSettings();
 });
 
-// ★削除: applyIndicatorsButton のリスナーは下に「sendBbSettingsToServer()」付きの方を1つだけ残す
-// applyIndicatorsButton.addEventListener('click', () => {
-//     start(currentDataType);
-//     indicatorSettings.classList.add('hidden');
-//     saveUserSettings();
-// });
+// Modify applyIndicatorsButton event listener（これを唯一の applyIndicators リスナーにする）
+applyIndicatorsButton.addEventListener('click', () => {
+  start(currentDataType);
+  saveUserSettings();
+  sendBbSettingsToServer(); // Send updated settings to server
+});
 
 intervalSelect.addEventListener('change', () => {
   currentInterval = intervalSelect.value;
   saveUserSettings();
-});
-
-toggleSettingsButton.addEventListener('click', () => {
-  indicatorSettings.classList.toggle('hidden');
-});
-
-toggleSubscribeButton.addEventListener('click', () => {
-  subscribeSettings.classList.toggle('hidden');
 });
 
 subscribeButton.addEventListener('click', async () => {
@@ -952,9 +944,6 @@ subscribeButton.addEventListener('click', async () => {
       statusMessage.textContent = result.message;
       emailInput.value = '';
       await refreshEmailList(); // Refresh the list, which will also update the button
-      setTimeout(() => {
-        subscribeSettings.classList.add('hidden');
-      }, 1500);
     } else {
       throw new Error(result.error || '登録に失敗しました。');
     }
@@ -1012,18 +1001,8 @@ async function refreshEmailList() {
 
         li.classList.add('email-list-item');
 
-        const buttonsContainer = document.createElement('div');
-        buttonsContainer.classList.add('email-item-buttons');
-
-        // Add condition settings button if the email matches the current user
+        // Add delete button if the email matches the current user
         if (currentUserEmail && item.email === currentUserEmail) {
-          const settingsButton = document.createElement('button');
-          settingsButton.textContent = '条件設定';
-          settingsButton.classList.add('condition-settings-button'); // Add a class for styling
-          // Add event listener for settings button if needed
-          // settingsButton.addEventListener('click', () => { ... });
-          buttonsContainer.appendChild(settingsButton);
-
           const deleteButton = document.createElement('button');
           deleteButton.textContent = '削除';
           deleteButton.classList.add('delete-email-button');
@@ -1035,9 +1014,8 @@ async function refreshEmailList() {
             await deleteEmail(emailToDelete);
           });
 
-          buttonsContainer.appendChild(deleteButton);
+          li.appendChild(deleteButton);
         }
-        li.appendChild(buttonsContainer);
         emailList.appendChild(li);
       });
     }
@@ -1288,8 +1266,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   socket.on('connect', () => {
     console.log('Connected to WebSocket server!');
-    // Send initial BB settings to the server once connected
-    sendBbSettingsToServer();
   });
 
       socket.on('bb_cross', async (data) => {
@@ -1343,23 +1319,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     // Removed global setup here as elements are dynamic
   
                 });
-  
-              // Function to send BB settings to the server
-function sendBbSettingsToServer() {
-  if (socket && socket.connected) {
-    const bbPeriod = parseInt(bbPeriodInput.value, 10);
-    const bbStdDev = parseFloat(bbStdDevInput.value);
-    if (!isNaN(bbPeriod) && !isNaN(bbStdDev)) {
-      socket.emit('update_bb_settings', { bbPeriod, bbStdDev });
-      console.log('Sent BB settings to server:', { bbPeriod, bbStdDev });
-    }
-  }
-}
 
-// Modify applyIndicatorsButton event listener（これを唯一の applyIndicators リスナーにする）
+// Modify applyIndicatorsButton event listener
 applyIndicatorsButton.addEventListener('click', () => {
   start(currentDataType);
-  indicatorSettings.classList.add('hidden');
   saveUserSettings();
-  sendBbSettingsToServer(); // Send updated settings to server
 });

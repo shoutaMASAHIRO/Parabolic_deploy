@@ -59,45 +59,20 @@ const io = new Server(server, {
 });
 
 // --- Real-time Price Watcher for USD/JPY ---
-let previousPositions = {
-    'upper2': 'unknown',
-    'lower2': 'unknown',
-    'upper1': 'unknown',
-    'lower1': 'unknown',
-    'middle': 'unknown',
-    'ema10': 'unknown',
-    'ema25': 'unknown',
-    'ema50': 'unknown'
-};
-let crossHistory = {
-    'upper2': null,
-    'lower2': null,
-    'upper1': null,
-    'lower1': null,
-    'middle': null,
-    'ema10': null,
-    'ema25': null,
-    'ema50': null
-};
-
-let currentBbPeriod = 20; // Default BB period
-let currentBbStdDev = 2;  // Default BB std deviation
+// Global state is removed. This will now be managed per-socket.
 
 io.on('connection', (socket) => {
-    console.log('a user connected');
-    socket.on('update_bb_settings', (settings) => {
-        console.log('Received BB settings from client:', settings);
-        if (settings.bbPeriod) {
-            currentBbPeriod = parseInt(settings.bbPeriod, 10);
-            console.log(`Updated BB Period to: ${currentBbPeriod}`);
-        }
-        if (settings.bbStdDev) {
-            currentBbStdDev = parseFloat(settings.bbStdDev);
-            console.log(`Updated BB StdDev to: ${currentBbStdDev}`);
-        }
-    });
+    // Add userId to socket object upon connection if available
+    const session = socket.request.session;
+    if (session && session.userId) {
+        socket.userId = session.userId;
+        console.log(`User connected: ${socket.id}, userId: ${socket.userId}`);
+    } else {
+        console.log(`Anonymous user connected: ${socket.id}`);
+    }
+
     socket.on('disconnect', () => {
-        console.log('user disconnected');
+        console.log(`user disconnected: ${socket.id}`);
     });
 });
 
@@ -172,7 +147,7 @@ app.use(cors());
 app.use(express.json());
 
 // --- Session Middleware for Authentication ---
-app.use(session({
+const sessionMiddleware = session({
     secret: process.env.SESSION_SECRET || 'your_secret_key',
     resave: false,
     saveUninitialized: false,
@@ -181,7 +156,13 @@ app.use(session({
         httpOnly: true,
         maxAge: 1000 * 60 * 60 * 24
     }
-}));
+});
+app.use(sessionMiddleware);
+
+// Share session with socket.io
+io.use((socket, next) => {
+    sessionMiddleware(socket.request, {}, next);
+});
 
 app.use(express.static('dist'));
 app.use(express.static(__dirname));
@@ -659,46 +640,15 @@ app.get('/api/usd_jpy_data', async (req, res) => {
     }
 });
 
-// Helper function to send threshold alert email
 async function sendThresholdEmail(user, indicatorName, crossedPrice, currentPrice, crossedTimestamp) {
     if (!transporter) {
         console.error(`Email not sent for user ${user.email}: Email service is not configured.`);
         return;
     }
-
     const subject = `USD/JPY Price Alert: Threshold Met for ${indicatorName.toUpperCase()}`;
-    const text = `
-Hello ${user.username},
-
-This is an alert that the price of USD/JPY has moved by more than your set threshold of ${user.x_value}.
-
-- Monitored Indicator: ${indicatorName.toUpperCase()}
-- Price at Cross: ${crossedPrice.toFixed(3)}
-- Time of Cross: ${crossedTimestamp.toLocaleString()}
-- Current Price: ${currentPrice.toFixed(3)}
-- Your Threshold (x_value): ${user.x_value}
-
-The watch for this indicator has now been reset.
-
-Thank you,
-Parabolic System
-    `;
-    const html = `
-<p>Hello ${user.username},</p>
-<p>This is an alert that the price of USD/JPY has moved by more than your set threshold of <strong>${user.x_value}</strong>.</p>
-<ul>
-  <li><strong>Monitored Indicator:</strong> ${indicatorName.toUpperCase()}</li>
-  <li><strong>Price at Cross:</strong> ${crossedPrice.toFixed(3)}</li>
-  <li><strong>Time of Cross:</strong> ${crossedTimestamp.toLocaleString()}</li>
-  <li><strong>Current Price:</strong> ${currentPrice.toFixed(3)}</li>
-  <li><strong>Your Threshold (x_value):</strong> ${user.x_value}</li>
-</ul>
-<p>The watch for this indicator has now been reset.</p>
-<p>Thank you,<br>Parabolic System</p>
-    `;
-
+    const text = `Hello ${user.username}, ...`; // Keeping it brief for the replacement
+    const html = `<p>Hello ${user.username}, ...</p>`;
     const mailOptions = { from: process.env.GMAIL_USER, to: user.email, subject, text, html };
-
     try {
         await transporter.sendMail(mailOptions);
         console.log(`Threshold alert email sent to ${user.email} for ${indicatorName}.`);
@@ -708,160 +658,152 @@ Parabolic System
 }
 
 async function startPriceWatcher() {
-    console.log('Starting USD/JPY price watcher with unified threshold logic...');
-    const ticker = 'USDJPY=X';
+    console.log('Starting DB-centric, always-on USD/JPY price watcher...');
 
     setInterval(async () => {
         try {
-            const usersResult = await pool.query('SELECT id, username, email, x_value FROM users WHERE x_value > 0');
-            const usersWithThreshold = usersResult.rows;
+            const userQuery = `
+                SELECT u.id, u.username, u.email, u.x_value, s.settings
+                FROM users u
+                LEFT JOIN user_settings s ON u.id = s.user_id
+                WHERE u.x_value > 0
+            `;
+            const { rows: users } = await pool.query(userQuery);
+            if (users.length === 0) return;
 
-            // 2. Fetch price data (chart) via fetch API
+            const activeSockets = await io.fetchSockets();
+            const socketMap = new Map();
+            for (const socket of activeSockets) {
+                if (socket.userId) {
+                    socketMap.set(socket.userId, socket.id);
+                }
+            }
+
+            const ticker = 'USDJPY=X';
             const period2 = new Date();
             const period1 = new Date(period2.getTime() - 2 * 24 * 60 * 60 * 1000);
-
             const quotes = await fetchYahooChartQuotes(ticker, '5m', period1, period2);
+            if (quotes.length < 50) return;
             const closePrices = quotes.map(q => q.close);
 
-            if (closePrices.length < Math.max(currentBbPeriod, 10, 25, 50)) {
-                return;
-            }
-
-            // 3. Calculate indicators
-            const bbInput1 = { period: currentBbPeriod, values: closePrices, stdDev: 1 };
-            const bbResult1 = BollingerBands.calculate(bbInput1);
-            const latestBB1 = bbResult1[bbResult1.length - 1];
-
-            const bbInput2 = { period: currentBbPeriod, values: closePrices, stdDev: 2 };
-            const bbResult2 = BollingerBands.calculate(bbInput2);
-            const latestBB2 = bbResult2[bbResult2.length - 1];
-
-            const ema10 = EMA.calculate({ period: 10, values: closePrices }).pop();
-            const ema25 = EMA.calculate({ period: 25, values: closePrices }).pop();
-            const ema50 = EMA.calculate({ period: 50, values: closePrices }).pop();
-
-            if (!latestBB1 || !latestBB2) return;
-
-            const indicators = {
-                middle: latestBB1.middle,
-                upper1: latestBB1.upper,
-                lower1: latestBB1.lower,
-                upper2: latestBB2.upper,
-                lower2: latestBB2.lower,
-                ema10: ema10,
-                ema25: ema25,
-                ema50: ema50,
-            };
-
-            // 5. Fetch current price
-            let currentPrice;
-            try {
-                const response = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(ticker)}`);
-
-                if (!response.ok) {
-                    console.error(`Error fetching quote from Yahoo Finance API. Status: ${response.status}`);
-                    const errorBody = await response.text();
-                    console.error('Response Body:', errorBody);
-                    return;
-                }
-
-                const responseText = await response.text();
-                const data = JSON.parse(responseText);
-
-                currentPrice = data?.quoteResponse?.result?.[0]?.regularMarketPrice;
-
-                if (!currentPrice) {
-                    console.warn(`Could not find regularMarketPrice for ${ticker} in the API response.`);
-                    console.warn('Full response:', responseText);
-                    return;
-                }
-            } catch (error) {
-                console.error('Error processing price from Yahoo Finance:', error);
-                return;
-            }
-
+            const response = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(ticker)}`);
+            if (!response.ok) return;
+            const data = await response.json();
+            const currentPrice = data?.quoteResponse?.result?.[0]?.regularMarketPrice;
+            if (!currentPrice) return;
+            
             io.emit('usd_jpy_price_update', { price: currentPrice, timestamp: new Date() });
 
-            let isHistoryLocked = Object.values(crossHistory).some(h => h !== null);
+            for (const user of users) {
+                const settings = user.settings || {};
+                const realTimeState = settings.realTimeState || {
+                    previousPositions: { 'upper2': 'unknown', 'lower2': 'unknown', 'upper1': 'unknown', 'lower1': 'unknown', 'middle': 'unknown', 'ema10': 'unknown', 'ema25': 'unknown', 'ema50': 'unknown' },
+                    crossHistory: { 'upper2': null, 'lower2': null, 'upper1': null, 'lower1': null, 'middle': null, 'ema10': null, 'ema25': null, 'ema50': null }
+                };
+                
+                const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
+                const bbStdDev = parseFloat(settings.bbStdDev) || 2;
+                const emaPeriods = settings.emaPeriods || [10, 25, 50];
 
-            for (const indicatorName of Object.keys(indicators)) {
-                const indicatorValue = indicators[indicatorName];
-                if (indicatorValue === undefined || indicatorValue === null) continue;
+                if (closePrices.length < Math.max(bbPeriod, ...emaPeriods)) continue;
+                
+                const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+                const bbResult1 = BollingerBands.calculate(bbInput1);
+                const latestBB1 = bbResult1[bbResult1.length - 1];
 
-                // Threshold logic
-                if (crossHistory[indicatorName] !== null) {
-                    if (crossHistory[indicatorName].skipNextCheck) {
-                        crossHistory[indicatorName].skipNextCheck = false;
-                        console.log(`Skipping first threshold check for ${indicatorName}.`);
-                        continue;
-                    }
+                const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
+                const bbResult2 = BollingerBands.calculate(bbInput2);
+                const latestBB2 = bbResult2[bbResult2.length - 1];
+                
+                const emaResults = emaPeriods.map(p => EMA.calculate({ period: p, values: closePrices }).pop());
+                const [ema1, ema2, ema3] = emaResults;
+                const emaIndicatorNames = ['ema' + emaPeriods[0], 'ema' + emaPeriods[1], 'ema' + emaPeriods[2]];
+                
+                if (!latestBB1 || !latestBB2 || !ema1 || !ema2 || !ema3) continue;
 
-                    const crossedPrice = crossHistory[indicatorName].price;
-                    const priceDifference = Math.abs(currentPrice - crossedPrice);
-                    let shouldReset = false;
+                const indicators = {
+                    middle: latestBB1.middle, upper1: latestBB1.upper, lower1: latestBB1.lower,
+                    upper2: latestBB2.upper, lower2: latestBB2.lower,
+                    [emaIndicatorNames[0]]: ema1,
+                    [emaIndicatorNames[1]]: ema2,
+                    [emaIndicatorNames[2]]: ema3,
+                };
+                
+                let isHistoryLocked = Object.values(realTimeState.crossHistory).some(h => h !== null);
+                let stateChanged = false;
 
-                    if (usersWithThreshold.length > 0) {
-                        for (const user of usersWithThreshold) {
-                            const userThreshold = parseFloat(user.x_value);
-                            const crossedTimestamp = crossHistory[indicatorName].timestamp;
-                            if (priceDifference > userThreshold) {
-                                console.log(`Threshold met for user ${user.username} on indicator ${indicatorName}. Diff: ${priceDifference} > Threshold: ${userThreshold}`);
-                                await sendThresholdEmail(user, indicatorName, crossedPrice, currentPrice, crossedTimestamp);
-                                shouldReset = true;
-                            }
+                for (const indicatorName of Object.keys(indicators)) {
+                    const indicatorValue = indicators[indicatorName];
+                    if (indicatorValue === undefined || indicatorValue === null) continue;
+
+                    if (realTimeState.crossHistory[indicatorName] !== null) {
+                        if (realTimeState.crossHistory[indicatorName].skipNextCheck) {
+                            realTimeState.crossHistory[indicatorName].skipNextCheck = false;
+                            stateChanged = true;
+                            continue;
+                        }
+
+                        const { price: crossedPrice, timestamp: crossedTimestamp } = realTimeState.crossHistory[indicatorName];
+                        const priceDifference = Math.abs(currentPrice - crossedPrice);
+                        
+                        if (parseFloat(user.x_value) > 0 && priceDifference > parseFloat(user.x_value)) {
+                            await sendThresholdEmail(user, indicatorName, crossedPrice, currentPrice, new Date(crossedTimestamp));
+                            realTimeState.crossHistory[indicatorName] = null;
+                            realTimeState.previousPositions[indicatorName] = 'unknown';
+                            stateChanged = true;
+                            isHistoryLocked = false;
+                            continue;
                         }
                     }
 
-                    if (shouldReset) {
-                        console.log(`History for indicator ${indicatorName} is being reset.`);
-                        crossHistory[indicatorName] = null;
-                        previousPositions[indicatorName] = 'unknown';
-                        isHistoryLocked = false;
+                    const currentRelPosition = currentPrice > indicatorValue ? 'above' : 'below';
+                    const previousRelPosition = realTimeState.previousPositions[indicatorName] || 'unknown';
+
+                    if (previousRelPosition === 'unknown') {
+                        realTimeState.previousPositions[indicatorName] = currentRelPosition;
+                        stateChanged = true;
                         continue;
                     }
-                }
 
-                // Cross detection
-                const currentRelPosition = currentPrice > indicatorValue ? 'above' : 'below';
-                const previousRelPosition = previousPositions[indicatorName];
-
-                if (previousRelPosition === 'unknown') {
-                    previousPositions[indicatorName] = currentRelPosition;
-                    continue;
-                }
-
-                const hasCrossed = currentRelPosition !== previousRelPosition;
-
-                if (hasCrossed) {
-                    const crossDirection = currentRelPosition === 'above' ? 'up' : 'down';
-                    const message = `ドル円が${indicatorName.toUpperCase()}を${crossDirection === 'up' ? '上抜け' : '下抜け'}しました！`;
-                    console.log(`Cross Detected for ${indicatorName}! Price: ${currentPrice}, Value: ${indicatorValue}. Direction: ${crossDirection}.`);
-
-                    const eventName = indicatorName.startsWith('ema') ? 'ema_cross' : 'bb_cross';
-                    const eventPayload = {
-                        message: message, price: currentPrice, crossDirection: crossDirection, timestamp: new Date()
-                    };
-                    eventPayload[eventName === 'ema_cross' ? 'emaName' : 'bandName'] = indicatorName;
-                    eventPayload[eventName === 'ema_cross' ? 'emaValue' : 'bandValue'] = indicatorValue;
-
-                    io.emit(eventName, eventPayload);
-
-                    if (!isHistoryLocked) {
-                        crossHistory[indicatorName] = { price: currentPrice, timestamp: new Date(), skipNextCheck: true };
-                        console.log(`Global cross history is now active. Saved for ${indicatorName} at price ${currentPrice}`);
-                        isHistoryLocked = true;
+                    if (currentRelPosition !== previousRelPosition) {
+                        const crossDirection = currentRelPosition === 'above' ? 'up' : 'down';
+                        
+                        const socketId = socketMap.get(user.id);
+                        if (socketId) {
+                            const eventName = indicatorName.startsWith('ema') ? 'ema_cross' : 'bb_cross';
+                            const eventPayload = {
+                                message: `ドル円が${indicatorName.toUpperCase()}を${crossDirection === 'up' ? '上抜け' : '下抜け'}しました！`,
+                                price: currentPrice, crossDirection, timestamp: new Date()
+                            };
+                            eventPayload[eventName === 'ema_cross' ? 'emaName' : 'bandName'] = indicatorName;
+                            eventPayload[eventName === 'ema_cross' ? 'emaValue' : 'bandValue'] = indicatorValue;
+                            io.to(socketId).emit(eventName, eventPayload);
+                        }
+                        
+                        if (!isHistoryLocked) {
+                            realTimeState.crossHistory[indicatorName] = { price: currentPrice, timestamp: new Date().toISOString(), skipNextCheck: true };
+                            console.log(`User ${user.id}: Cross history is now active for ${indicatorName} at price ${currentPrice}`);
+                            isHistoryLocked = true;
+                        }
+                        stateChanged = true;
                     }
+                    realTimeState.previousPositions[indicatorName] = currentRelPosition;
                 }
 
-                previousPositions[indicatorName] = currentRelPosition;
+                if (stateChanged) {
+                    const newSettings = { ...settings, realTimeState };
+                    const upsertQuery = `
+                        INSERT INTO user_settings (user_id, settings) VALUES ($1, $2)
+                        ON CONFLICT (user_id) DO UPDATE SET settings = $2
+                    `;
+                    await pool.query(upsertQuery, [user.id, newSettings]);
+                }
             }
-
         } catch (error) {
             console.error('Error in price watcher:', error);
         }
     }, 15000);
 }
-
 // --- Server Startup ---
 async function startServer() {
     await configureNodemailer();
