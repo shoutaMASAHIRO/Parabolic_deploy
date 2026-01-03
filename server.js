@@ -1,6 +1,5 @@
 const nodemailer = require("nodemailer");
 const express = require('express');
-const yahooFinance = require('yahoo-finance2').default;
 const cors = require('cors');
 const { Pool } = require('pg');
 const { SSMClient, GetParametersCommand } = require("@aws-sdk/client-ssm");
@@ -26,8 +25,8 @@ async function configureNodemailer() {
 
         const { Parameters } = await ssmClient.send(command);
 
-        const gmailUser = Parameters.find(p => p.Name === '/parabolic/gmail/user').Value;
-        const gmailPass = Parameters.find(p => p.Name === '/parabolic/gmail/pass').Value;
+        const gmailUser = Parameters.find(p => p.Name === '/parabolic/gmail/user')?.Value;
+        const gmailPass = Parameters.find(p => p.Name === '/parabolic/gmail/pass')?.Value;
 
         if (!gmailUser || !gmailPass) {
             throw new Error("Gmail credentials not found in Parameter Store.");
@@ -46,8 +45,6 @@ async function configureNodemailer() {
 
     } catch (error) {
         console.error("Failed to configure Nodemailer from Parameter Store:", error);
-        // In a production environment, you might want to handle this more gracefully,
-        // for example, by preventing the app from starting or sending an alert.
     }
 }
 
@@ -56,29 +53,35 @@ const port = 3000;
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: "*", // Allow all origins for simplicity. In production, restrict this to your domain.
+        origin: "*",
         methods: ["GET", "POST"]
     }
 });
 
 // --- Real-time Price Watcher for USD/JPY ---
 let previousPositions = {
-    'upper2': 'unknown', // price relative to +2σ upper band ('above'/'below')
-    'lower2': 'unknown', // price relative to +2σ lower band ('above'/'below')
-    'upper1': 'unknown', // price relative to +1σ upper band ('above'/'below')
-    'lower1': 'unknown', // price relative to +1σ lower band ('above'/'below')
-    'middle': 'unknown'  // price relative to middle band ('above'/'below')
-};
-let currentBbPeriod = 20; // Default BB period
-let currentBbStdDev = 2;  // Default BB std deviation
-
-// --- Real-time Price Watcher for EMA ---
-let previousPositionsEMA = {
+    'upper2': 'unknown',
+    'lower2': 'unknown',
+    'upper1': 'unknown',
+    'lower1': 'unknown',
+    'middle': 'unknown',
     'ema10': 'unknown',
     'ema25': 'unknown',
     'ema50': 'unknown'
 };
+let crossHistory = {
+    'upper2': null,
+    'lower2': null,
+    'upper1': null,
+    'lower1': null,
+    'middle': null,
+    'ema10': null,
+    'ema25': null,
+    'ema50': null
+};
 
+let currentBbPeriod = 20; // Default BB period
+let currentBbStdDev = 2;  // Default BB std deviation
 
 io.on('connection', (socket) => {
     console.log('a user connected');
@@ -98,8 +101,6 @@ io.on('connection', (socket) => {
     });
 });
 
-
-
 // --- Database Setup ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -113,7 +114,7 @@ async function createEmailsTable() {
       CREATE TABLE IF NOT EXISTS emails (
         id SERIAL PRIMARY KEY,
         email VARCHAR(255) UNIQUE NOT NULL,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, -- user_idを追加し、NULLを許可
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -166,21 +167,19 @@ async function createUserSettingsTable() {
     }
 }
 
-
-
 // --- Middleware ---
 app.use(cors());
-app.use(express.json()); // Middleware to parse JSON bodies
+app.use(express.json());
 
 // --- Session Middleware for Authentication ---
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'your_secret_key', // Replace with a strong, secret key in production
+    secret: process.env.SESSION_SECRET || 'your_secret_key',
     resave: false,
     saveUninitialized: false,
     cookie: { 
-        secure: process.env.NODE_ENV === 'production', // Set to true if using HTTPS (recommended for production)
-        httpOnly: true, // Prevents client-side JS from accessing the cookie
-        maxAge: 1000 * 60 * 60 * 24 // 1 day
+        secure: process.env.NODE_ENV === 'production',
+        httpOnly: true,
+        maxAge: 1000 * 60 * 60 * 24
     }
 }));
 
@@ -191,7 +190,56 @@ app.use(express.static(__dirname));
 const cache = {};
 const CACHE_TTL = 60 * 1000; // 60 seconds
 
-// --- API Endpoints ---
+// ===== Yahoo Chart API (fetch) helper =====
+async function fetchYahooChartQuotes(symbol, interval, period1Date, period2Date) {
+    const p1 = Math.floor(period1Date.getTime() / 1000);
+    const p2 = Math.floor(period2Date.getTime() / 1000);
+
+    const url =
+        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
+        `?interval=${encodeURIComponent(interval)}&period1=${p1}&period2=${p2}`;
+
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const text = await r.text();
+
+    if (!r.ok) {
+        throw new Error(`Yahoo chart HTTP ${r.status}: ${text.slice(0, 200)}`);
+    }
+
+    let json;
+    try {
+        json = JSON.parse(text);
+    } catch {
+        throw new Error(`Yahoo chart JSON parse failed: ${text.slice(0, 200)}`);
+    }
+
+    const result = json?.chart?.result?.[0];
+    if (!result) {
+        throw new Error(`Yahoo chart missing result: ${text.slice(0, 200)}`);
+    }
+
+    const ts = result.timestamp || [];
+    const q = result.indicators?.quote?.[0] || {};
+    const adj = result.indicators?.adjclose?.[0]?.adjclose || null;
+
+    const out = [];
+    for (let i = 0; i < ts.length; i++) {
+        const close = q.close?.[i];
+        if (close == null) continue;
+
+        out.push({
+            date: new Date(ts[i] * 1000),
+            open: q.open?.[i],
+            high: q.high?.[i],
+            low: q.low?.[i],
+            close: close,
+            volume: q.volume?.[i],
+            adjclose: adj?.[i] ?? close,
+        });
+    }
+
+    return out;
+}
 
 // --- API Endpoints for Authentication ---
 app.post('/api/auth/register', async (req, res) => {
@@ -205,21 +253,21 @@ app.post('/api/auth/register', async (req, res) => {
     }
 
     try {
-        const hashedPassword = await bcrypt.hash(password, 10); // Hash the password
+        const hashedPassword = await bcrypt.hash(password, 10);
         const result = await pool.query(
             'INSERT INTO users (email, username, password_hash) VALUES ($1, $2, $3) RETURNING id, email, username',
             [email, username, hashedPassword]
         );
         const user = result.rows[0];
-        req.session.userId = user.id; // Log in the user immediately
+        req.session.userId = user.id;
         res.status(201).json({ message: 'Registration successful!', user: { id: user.id, email: user.email, username: user.username } });
     } catch (error) {
         console.error('Registration error:', error);
-        if (error.code === '23505') { // Unique violation
-            if (error.detail.includes('email')) {
+        if (error.code === '23505') {
+            if (error.detail?.includes('email')) {
                 return res.status(409).json({ error: 'Email already in use.' });
             }
-            if (error.detail.includes('username')) {
+            if (error.detail?.includes('username')) {
                 return res.status(409).json({ error: 'Username already taken.' });
             }
         }
@@ -250,7 +298,7 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials.' });
         }
 
-        req.session.userId = user.id; // Store user ID in session
+        req.session.userId = user.id;
         res.status(200).json({ message: 'Login successful!', user: { id: user.id, email: user.email, username: user.username } });
     } catch (error) {
         console.error('Login error:', error);
@@ -264,7 +312,7 @@ app.post('/api/auth/logout', (req, res) => {
             console.error('Logout error:', err);
             return res.status(500).json({ error: 'Failed to log out.' });
         }
-        res.clearCookie('connect.sid'); // Clear session cookie
+        res.clearCookie('connect.sid');
         res.status(200).json({ message: 'Logout successful!' });
     });
 });
@@ -282,7 +330,7 @@ app.get('/api/auth/me', async (req, res) => {
         const user = result.rows[0];
 
         if (!user) {
-            req.session.destroy(); // Session invalid, destroy it
+            req.session.destroy();
             return res.status(401).json({ error: 'User not found or session invalid.' });
         }
         res.status(200).json({ user: { id: user.id, email: user.email, username: user.username } });
@@ -305,7 +353,7 @@ app.get('/api/user/settings', async (req, res) => {
         if (result.rows.length > 0) {
             res.status(200).json(result.rows[0].settings);
         } else {
-            res.status(200).json({}); // Return empty settings if none found
+            res.status(200).json({});
         }
     } catch (error) {
         console.error('Fetch user settings error:', error);
@@ -313,34 +361,12 @@ app.get('/api/user/settings', async (req, res) => {
     }
 });
 
-// API to save/update user settings
+// API to save/update user settings（重複してたので1つだけ）
 app.post('/api/user/settings', async (req, res) => {
     if (!req.session.userId) {
         return res.status(401).json({ error: 'Not authenticated.' });
     }
-    const settings = req.body; // Settings sent from client
-
-    try {
-        const result = await pool.query(
-            `INSERT INTO user_settings (user_id, settings)
-             VALUES ($1, $2)
-             ON CONFLICT (user_id) DO UPDATE SET settings = EXCLUDED.settings, updated_at = CURRENT_TIMESTAMP
-             RETURNING settings`,
-            [req.session.userId, settings]
-        );
-        res.status(200).json(result.rows[0].settings);
-    } catch (error) {
-        console.error('Save user settings error:', error);
-        res.status(500).json({ error: 'An internal server error occurred while saving settings.' });
-    }
-});
-
-// API to save/update user settings
-app.post('/api/user/settings', async (req, res) => {
-    if (!req.session.userId) {
-        return res.status(401).json({ error: 'Not authenticated.' });
-    }
-    const settings = req.body; // Settings sent from client
+    const settings = req.body;
 
     try {
         const result = await pool.query(
@@ -371,7 +397,6 @@ app.get('/api/user/x_value', async (req, res) => {
         if (result.rows.length > 0) {
             res.status(200).json({ x_value: result.rows[0].x_value });
         } else {
-            // This case should ideally not happen if a user ID is in session but not in DB
             res.status(404).json({ error: 'User not found.' });
         }
     } catch (error) {
@@ -407,11 +432,10 @@ app.post('/api/user/x_value', async (req, res) => {
     }
 });
 
-// New endpoint to subscribe an email
+// Subscribe email
 app.post('/api/subscribe', async (req, res) => {
     const { email } = req.body;
 
-    // Basic email validation
     if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
         return res.status(400).json({ error: 'Please provide a valid email address.' });
     }
@@ -433,7 +457,6 @@ app.post('/api/subscribe', async (req, res) => {
     }
 });
 
-// New endpoint to get all subscribed emails
 app.get('/api/emails', async (req, res) => {
     try {
         const result = await pool.query('SELECT email FROM emails ORDER BY created_at DESC');
@@ -444,7 +467,6 @@ app.get('/api/emails', async (req, res) => {
     }
 });
 
-// New endpoint to delete an email
 app.delete('/api/emails/:email', async (req, res) => {
     const { email } = req.params;
 
@@ -498,128 +520,30 @@ app.post('/api/send-emails', async (req, res) => {
     }
 });
 
-
-
+// =====================
+//   Price Data APIs
+// =====================
 app.get('/api/data', async (req, res) => {
-        const { ticker, interval } = req.query;
+    const { ticker, interval } = req.query;
 
-        if (!ticker || !interval) {
-            return res.status(400).json({ error: 'Ticker and interval are required' });
-        }
-
-        const cacheKey = `stock-${ticker}-${interval}`; // Differentiate cache keys for stocks and USD/JPY
-        const now = Date.now();
-
-        // Check cache first
-        if (cache[cacheKey] && (now - cache[cacheKey].timestamp < CACHE_TTL)) {
-            // console.log(`Serving from cache: ${cacheKey}`);
-            return res.json(cache[cacheKey].data);
-        }
-
-        // Map interval to yahoo-finance2 format
-        const validIntervals = ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "4h", "8h", "1d", "5d", "1wk", "1mo", "3mo"];
-        if (!validIntervals.includes(interval)) {
-            return res.status(400).json({ error: `Invalid interval. Valid intervals are: ${validIntervals.join(', ')}` });
-        }
-
-        // Dynamically adjust period based on interval to ensure enough data for indicators
-        const isIntraday = interval.endsWith('m') || interval.endsWith('h');
-
-        let daysToFetch;
-        let actualInterval = interval; // Variable to hold the actual interval to request from Yahoo Finance
-
-        switch (interval) {
-            case "1m":
-            case "2m":
-            case "5m":
-            case "15m":
-            case "30m":
-                daysToFetch = 30;
-                break;
-            case "60m":
-            case "1h":
-                daysToFetch = 60;
-                break;
-            case "4h": // For 4h, fetch 1h data and aggregate on client
-                daysToFetch = 120; // Fetch enough 1h data to cover ~4 months
-                actualInterval = '1h'; // Request 1h data from Yahoo Finance
-                break;
-            case "8h": // For 8h, fetch 1h data and aggregate on client
-                daysToFetch = 180; // Fetch enough 1h data to cover ~6 months
-                actualInterval = '1h'; // Request 1h data from Yahoo Finance
-                break;
-            case "1d":
-                daysToFetch = 365;
-                break;
-            case "5d": // Each bar represents 5 days
-                daysToFetch = 365 * 5;
-                break;
-            case "1wk":
-                daysToFetch = 365 * 5; // Fetch approximately 5 years of weekly data
-                break;
-            case "1mo":
-                daysToFetch = 365 * 30; // Approximate
-                break;
-            case "3mo":
-                daysToFetch = 365 * 90; // Approximate
-                break;
-            default:
-                daysToFetch = 365; // Default to 365 days if interval not explicitly handled
-        }
-
-        const queryOptions = {
-            period1: new Date(Date.now() - daysToFetch * 24 * 60 * 60 * 1000),
-            interval: actualInterval,
-        };
-
-        try {
-            // console.log(`Fetching from Yahoo Finance: ${ticker}`);
-            const result = await yahooFinance.chart(ticker, queryOptions);
-            
-            if (!result.quotes || result.quotes.length === 0) {
-                return res.status(404).json({ error: `No data found for ticker: ${ticker}` });
-            }
-
-            // Store in cache
-            cache[cacheKey] = {
-                timestamp: Date.now(),
-                data: result.quotes,
-            };
-
-            res.json(result.quotes);
-        } catch (error) {
-            console.error(error);
-            if (error.code === 'BAD_REQUEST') {
-                 return res.status(404).json({ error: `No data found for ticker: ${ticker}. It may be an invalid symbol.` });
-            }
-            res.status(500).json({ error: 'Failed to fetch data from Yahoo Finance' });
-        }
-    });
-// New endpoint for USD/JPY data
-app.get('/api/usd_jpy_data', async (req, res) => {
-    const ticker = 'USDJPY=X'; // Yahoo Finance symbol for USD/JPY
-    let { interval } = req.query; // Get interval from query
-
-    if (!interval) {
-        return res.status(400).json({ error: 'Interval is required for USD/JPY' });
+    if (!ticker || !interval) {
+        return res.status(400).json({ error: 'Ticker and interval are required' });
     }
 
-    // Map interval to yahoo-finance2 format (same as for stocks)
+    const cacheKey = `stock-${ticker}-${interval}`;
+    const now = Date.now();
+
+    if (cache[cacheKey] && (now - cache[cacheKey].timestamp < CACHE_TTL)) {
+        return res.json(cache[cacheKey].data);
+    }
+
     const validIntervals = ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "4h", "8h", "1d", "5d", "1wk", "1mo", "3mo"];
     if (!validIntervals.includes(interval)) {
         return res.status(400).json({ error: `Invalid interval. Valid intervals are: ${validIntervals.join(', ')}` });
     }
 
-    const cacheKey = `usd_jpy-${ticker}-${interval}`; // Differentiate cache keys
-    const now = Date.now();
-
-    // Check cache first
-    if (cache[cacheKey] && (now - cache[cacheKey].timestamp < CACHE_TTL)) {
-        return res.json(cache[cacheKey].data);
-    }
-
     let daysToFetch;
-    let actualInterval = interval; // Variable to hold the actual interval to request from Yahoo Finance
+    let actualInterval = interval;
 
     switch (interval) {
         case "1m":
@@ -627,95 +551,183 @@ app.get('/api/usd_jpy_data', async (req, res) => {
         case "5m":
         case "15m":
         case "30m":
-            daysToFetch = 30;
-            break;
+            daysToFetch = 30; break;
         case "60m":
         case "1h":
-            daysToFetch = 60;
-            break;
-        case "4h": // For 4h, fetch 1h data and aggregate on client
-            daysToFetch = 120; // Fetch enough 1h data to cover ~4 months
-            actualInterval = '1h'; // Request 1h data from Yahoo Finance
-            break;
-        case "8h": // For 8h, fetch 1h data and aggregate on client
-            daysToFetch = 180; // Fetch enough 1h data to cover ~6 months
-            actualInterval = '1h'; // Request 1h data from Yahoo Finance
-            break;
+            daysToFetch = 60; break;
+        case "4h":
+            daysToFetch = 120; actualInterval = '1h'; break;
+        case "8h":
+            daysToFetch = 180; actualInterval = '1h'; break;
         case "1d":
-            daysToFetch = 365;
-            break;
-        case "5d": // Each bar represents 5 days
-            daysToFetch = 365 * 5;
-            break;
+            daysToFetch = 365; break;
+        case "5d":
+            daysToFetch = 365 * 5; break;
         case "1wk":
-            daysToFetch = 365 * 5; // Fetch approximately 5 years of weekly data
-            break;
+            daysToFetch = 365 * 5; break;
         case "1mo":
-            daysToFetch = 365 * 30; // Approximate
-            break;
+            daysToFetch = 365 * 30; break;
         case "3mo":
-            daysToFetch = 365 * 90; // Approximate
-            break;
+            daysToFetch = 365 * 90; break;
         default:
-            daysToFetch = 365; // Default to 365 days if interval not explicitly handled
+            daysToFetch = 365;
     }
 
-    const queryOptions = {
-        period1: new Date(Date.now() - daysToFetch * 24 * 60 * 60 * 1000),
-        interval: actualInterval,
-    };
+    try {
+        const period2 = new Date();
+        const period1 = new Date(period2.getTime() - daysToFetch * 24 * 60 * 60 * 1000);
+
+        const quotes = await fetchYahooChartQuotes(ticker, actualInterval, period1, period2);
+
+        if (!quotes || quotes.length === 0) {
+            return res.status(404).json({ error: `No data found for ticker: ${ticker}` });
+        }
+
+        cache[cacheKey] = { timestamp: Date.now(), data: quotes };
+        res.json(quotes);
+    } catch (error) {
+        console.error('api/data error:', error);
+        res.status(500).json({ error: 'Failed to fetch data from Yahoo Finance' });
+    }
+});
+
+// USD/JPY endpoint
+app.get('/api/usd_jpy_data', async (req, res) => {
+    const ticker = 'USDJPY=X';
+    let { interval } = req.query;
+
+    if (!interval) interval = '1d';
+
+    const validIntervals = ["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "4h", "8h", "1d", "5d", "1wk", "1mo", "3mo"];
+    if (!validIntervals.includes(interval)) {
+        return res.status(400).json({ error: `Invalid interval. Valid intervals are: ${validIntervals.join(', ')}` });
+    }
+
+    const cacheKey = `usd_jpy-${ticker}-${interval}`;
+    const now = Date.now();
+
+    if (cache[cacheKey] && (now - cache[cacheKey].timestamp < CACHE_TTL)) {
+        return res.json(cache[cacheKey].data);
+    }
+
+    let daysToFetch;
+    let actualInterval = interval;
+
+    switch (interval) {
+        case "1m":
+        case "2m":
+        case "5m":
+        case "15m":
+        case "30m":
+            daysToFetch = 30; break;
+        case "60m":
+        case "1h":
+            daysToFetch = 60; break;
+        case "4h":
+            daysToFetch = 120; actualInterval = '1h'; break;
+        case "8h":
+            daysToFetch = 180; actualInterval = '1h'; break;
+        case "1d":
+            daysToFetch = 365; break;
+        case "5d":
+            daysToFetch = 365 * 5; break;
+        case "1wk":
+            daysToFetch = 365 * 5; break;
+        case "1mo":
+            daysToFetch = 365 * 30; break;
+        case "3mo":
+            daysToFetch = 365 * 90; break;
+        default:
+            daysToFetch = 365;
+    }
 
     try {
-        const result = await yahooFinance.chart(ticker, queryOptions);
-        
-        if (!result.quotes || result.quotes.length === 0) {
+        const period2 = new Date();
+        const period1 = new Date(period2.getTime() - daysToFetch * 24 * 60 * 60 * 1000);
+
+        const quotes = await fetchYahooChartQuotes(ticker, actualInterval, period1, period2);
+
+        if (!quotes || quotes.length === 0) {
             return res.status(404).json({ error: `No data found for USD/JPY with interval ${interval}.` });
         }
 
-        // Store in cache
-        cache[cacheKey] = {
-            timestamp: Date.now(),
-            data: result.quotes,
-        };
-
-        res.json(result.quotes);
+        cache[cacheKey] = { timestamp: Date.now(), data: quotes };
+        res.json(quotes);
     } catch (error) {
-        console.error(error);
-        if (error.code === 'BAD_REQUEST') {
-             return res.status(404).json({ error: `No data found for USD/JPY for interval '${interval}'. This interval may not be supported by Yahoo Finance for currency pairs like USDJPY=X.` });
-        }
+        console.error('api/usd_jpy_data error:', error);
         res.status(500).json({ error: 'Failed to fetch USD/JPY data from Yahoo Finance' });
     }
 });
 
+// Helper function to send threshold alert email
+async function sendThresholdEmail(user, indicatorName, crossedPrice, currentPrice, crossedTimestamp) {
+    if (!transporter) {
+        console.error(`Email not sent for user ${user.email}: Email service is not configured.`);
+        return;
+    }
+
+    const subject = `USD/JPY Price Alert: Threshold Met for ${indicatorName.toUpperCase()}`;
+    const text = `
+Hello ${user.username},
+
+This is an alert that the price of USD/JPY has moved by more than your set threshold of ${user.x_value}.
+
+- Monitored Indicator: ${indicatorName.toUpperCase()}
+- Price at Cross: ${crossedPrice.toFixed(3)}
+- Time of Cross: ${crossedTimestamp.toLocaleString()}
+- Current Price: ${currentPrice.toFixed(3)}
+- Your Threshold (x_value): ${user.x_value}
+
+The watch for this indicator has now been reset.
+
+Thank you,
+Parabolic System
+    `;
+    const html = `
+<p>Hello ${user.username},</p>
+<p>This is an alert that the price of USD/JPY has moved by more than your set threshold of <strong>${user.x_value}</strong>.</p>
+<ul>
+  <li><strong>Monitored Indicator:</strong> ${indicatorName.toUpperCase()}</li>
+  <li><strong>Price at Cross:</strong> ${crossedPrice.toFixed(3)}</li>
+  <li><strong>Time of Cross:</strong> ${crossedTimestamp.toLocaleString()}</li>
+  <li><strong>Current Price:</strong> ${currentPrice.toFixed(3)}</li>
+  <li><strong>Your Threshold (x_value):</strong> ${user.x_value}</li>
+</ul>
+<p>The watch for this indicator has now been reset.</p>
+<p>Thank you,<br>Parabolic System</p>
+    `;
+
+    const mailOptions = { from: process.env.GMAIL_USER, to: user.email, subject, text, html };
+
+    try {
+        await transporter.sendMail(mailOptions);
+        console.log(`Threshold alert email sent to ${user.email} for ${indicatorName}.`);
+    } catch (error) {
+        console.error(`Failed to send threshold alert email to ${user.email}:`, error);
+    }
+}
+
 async function startPriceWatcher() {
-    console.log('Starting USD/JPY price watcher...');
+    console.log('Starting USD/JPY price watcher with unified threshold logic...');
     const ticker = 'USDJPY=X';
 
     setInterval(async () => {
         try {
-            // 1. Fetch recent historical data to calculate BB
-            const queryOptions = {
-                period1: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000), // Fetch last 2 days of 1-minute data
-                interval: '1m',
-            };
-            const chartData = await yahooFinance.chart(ticker, queryOptions);
-            if (!chartData.quotes || chartData.quotes.length < currentBbPeriod) { // Use currentBbPeriod here
-                // Not enough data to calculate BB
+            const usersResult = await pool.query('SELECT id, username, email, x_value FROM users WHERE x_value > 0');
+            const usersWithThreshold = usersResult.rows;
+
+            // 2. Fetch price data (chart) via fetch API
+            const period2 = new Date();
+            const period1 = new Date(period2.getTime() - 2 * 24 * 60 * 60 * 1000);
+
+            const quotes = await fetchYahooChartQuotes(ticker, '5m', period1, period2);
+            const closePrices = quotes.map(q => q.close);
+
+            if (closePrices.length < Math.max(currentBbPeriod, 10, 25, 50)) {
                 return;
             }
-            const closePrices = chartData.quotes.map(q => q.close);
 
-            // Calculate EMAs
-            const ema10 = EMA.calculate({ period: 10, values: closePrices });
-            const ema25 = EMA.calculate({ period: 25, values: closePrices });
-            const ema50 = EMA.calculate({ period: 50, values: closePrices });
-
-            const latestEMA10 = ema10.length > 0 ? ema10[ema10.length - 1] : null;
-            const latestEMA25 = ema25.length > 0 ? ema25[ema25.length - 1] : null;
-            const latestEMA50 = ema50.length > 0 ? ema50[ema50.length - 1] : null;
-
-            // 2. Calculate Bollinger Bands for 1σ and 2σ
+            // 3. Calculate indicators
             const bbInput1 = { period: currentBbPeriod, values: closePrices, stdDev: 1 };
             const bbResult1 = BollingerBands.calculate(bbInput1);
             const latestBB1 = bbResult1[bbResult1.length - 1];
@@ -724,97 +736,136 @@ async function startPriceWatcher() {
             const bbResult2 = BollingerBands.calculate(bbInput2);
             const latestBB2 = bbResult2[bbResult2.length - 1];
 
+            const ema10 = EMA.calculate({ period: 10, values: closePrices }).pop();
+            const ema25 = EMA.calculate({ period: 25, values: closePrices }).pop();
+            const ema50 = EMA.calculate({ period: 50, values: closePrices }).pop();
+
             if (!latestBB1 || !latestBB2) return;
 
-            const bands = {
-                middle: latestBB1.middle, // Middle band is common for both stdDev 1 and 2
+            const indicators = {
+                middle: latestBB1.middle,
                 upper1: latestBB1.upper,
                 lower1: latestBB1.lower,
                 upper2: latestBB2.upper,
                 lower2: latestBB2.lower,
+                ema10: ema10,
+                ema25: ema25,
+                ema50: ema50,
             };
 
-            // 3. Fetch the current real-time price
-            const quote = await yahooFinance.quote(ticker);
-            const currentPrice = quote.regularMarketPrice;
-            if (!currentPrice) return;
+            // 5. Fetch current price
+            let currentPrice;
+            try {
+                const response = await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(ticker)}`);
 
-            // Emit current price update for client-side logic
+                if (!response.ok) {
+                    console.error(`Error fetching quote from Yahoo Finance API. Status: ${response.status}`);
+                    const errorBody = await response.text();
+                    console.error('Response Body:', errorBody);
+                    return;
+                }
+
+                const responseText = await response.text();
+                const data = JSON.parse(responseText);
+
+                currentPrice = data?.quoteResponse?.result?.[0]?.regularMarketPrice;
+
+                if (!currentPrice) {
+                    console.warn(`Could not find regularMarketPrice for ${ticker} in the API response.`);
+                    console.warn('Full response:', responseText);
+                    return;
+                }
+            } catch (error) {
+                console.error('Error processing price from Yahoo Finance:', error);
+                return;
+            }
+
             io.emit('usd_jpy_price_update', { price: currentPrice, timestamp: new Date() });
 
-            const checkAndEmitCross = (bandName, bandValue, price, previousPosMap) => {
-                const currentRelPosition = price > bandValue ? 'above' : 'below'; // Determine current position relative to band
-                if (previousPosMap[bandName] === 'unknown') {
-                    previousPosMap[bandName] = currentRelPosition; // Initialize if first run
-                    return;
+            let isHistoryLocked = Object.values(crossHistory).some(h => h !== null);
+
+            for (const indicatorName of Object.keys(indicators)) {
+                const indicatorValue = indicators[indicatorName];
+                if (indicatorValue === undefined || indicatorValue === null) continue;
+
+                // Threshold logic
+                if (crossHistory[indicatorName] !== null) {
+                    if (crossHistory[indicatorName].skipNextCheck) {
+                        crossHistory[indicatorName].skipNextCheck = false;
+                        console.log(`Skipping first threshold check for ${indicatorName}.`);
+                        continue;
+                    }
+
+                    const crossedPrice = crossHistory[indicatorName].price;
+                    const priceDifference = Math.abs(currentPrice - crossedPrice);
+                    let shouldReset = false;
+
+                    if (usersWithThreshold.length > 0) {
+                        for (const user of usersWithThreshold) {
+                            const userThreshold = parseFloat(user.x_value);
+                            const crossedTimestamp = crossHistory[indicatorName].timestamp;
+                            if (priceDifference > userThreshold) {
+                                console.log(`Threshold met for user ${user.username} on indicator ${indicatorName}. Diff: ${priceDifference} > Threshold: ${userThreshold}`);
+                                await sendThresholdEmail(user, indicatorName, crossedPrice, currentPrice, crossedTimestamp);
+                                shouldReset = true;
+                            }
+                        }
+                    }
+
+                    if (shouldReset) {
+                        console.log(`History for indicator ${indicatorName} is being reset.`);
+                        crossHistory[indicatorName] = null;
+                        previousPositions[indicatorName] = 'unknown';
+                        isHistoryLocked = false;
+                        continue;
+                    }
                 }
 
-                if (currentRelPosition !== previousPosMap[bandName]) { // Check if position has changed (a cross occurred)
-                    // A cross has occurred
+                // Cross detection
+                const currentRelPosition = currentPrice > indicatorValue ? 'above' : 'below';
+                const previousRelPosition = previousPositions[indicatorName];
+
+                if (previousRelPosition === 'unknown') {
+                    previousPositions[indicatorName] = currentRelPosition;
+                    continue;
+                }
+
+                const hasCrossed = currentRelPosition !== previousRelPosition;
+
+                if (hasCrossed) {
                     const crossDirection = currentRelPosition === 'above' ? 'up' : 'down';
-                    const message = `ドル円が${bandName}を${crossDirection === 'up' ? '上抜け' : '下抜け'}しました！`;
-                    console.log(`BB Cross Detected for ${bandName}! Price: ${price}, Band: ${bandValue}. Direction: ${crossDirection}. Emitting event.`);
-                    io.emit('bb_cross', {
-                        message: message,
-                        price: price,
-                        bandName: bandName,
-                        bandValue: bandValue,
-                        crossDirection: crossDirection,
-                        timestamp: new Date()
-                    });
-                }
-                previousPosMap[bandName] = currentRelPosition; // Update previous position
-            };
+                    const message = `ドル円が${indicatorName.toUpperCase()}を${crossDirection === 'up' ? '上抜け' : '下抜け'}しました！`;
+                    console.log(`Cross Detected for ${indicatorName}! Price: ${currentPrice}, Value: ${indicatorValue}. Direction: ${crossDirection}.`);
 
-            const checkAndEmitCrossEMA = (emaName, emaValue, price, previousPosMap) => {
-                const currentRelPosition = price > emaValue ? 'above' : 'below'; // Determine current position relative to EMA
-                if (previousPosMap[emaName] === 'unknown') {
-                    previousPosMap[emaName] = currentRelPosition; // Initialize if first run
-                    return;
+                    const eventName = indicatorName.startsWith('ema') ? 'ema_cross' : 'bb_cross';
+                    const eventPayload = {
+                        message: message, price: currentPrice, crossDirection: crossDirection, timestamp: new Date()
+                    };
+                    eventPayload[eventName === 'ema_cross' ? 'emaName' : 'bandName'] = indicatorName;
+                    eventPayload[eventName === 'ema_cross' ? 'emaValue' : 'bandValue'] = indicatorValue;
+
+                    io.emit(eventName, eventPayload);
+
+                    if (!isHistoryLocked) {
+                        crossHistory[indicatorName] = { price: currentPrice, timestamp: new Date(), skipNextCheck: true };
+                        console.log(`Global cross history is now active. Saved for ${indicatorName} at price ${currentPrice}`);
+                        isHistoryLocked = true;
+                    }
                 }
 
-                if (currentRelPosition !== previousPosMap[emaName]) { // Check if position has changed (a cross occurred)
-                    // A cross has occurred
-                    const crossDirection = currentRelPosition === 'above' ? 'up' : 'down';
-                    const message = `ドル円が${emaName}を${crossDirection === 'up' ? '上抜け' : '下抜け'}しました！`;
-                    console.log(`EMA Cross Detected for ${emaName}! Price: ${price}, EMA: ${emaValue}. Direction: ${crossDirection}. Emitting event.`);
-                    io.emit('ema_cross', { // Emit 'ema_cross' event
-                        message: message,
-                        price: price,
-                        emaName: emaName,
-                        emaValue: emaValue,
-                        crossDirection: crossDirection,
-                        timestamp: new Date()
-                    });
-                }
-                previousPosMap[emaName] = currentRelPosition; // Update previous position
-            };
-
-            // 5. Detect BB crosses
-            checkAndEmitCross('upper2', bands.upper2, currentPrice, previousPositions);
-            checkAndEmitCross('lower2', bands.lower2, currentPrice, previousPositions);
-            checkAndEmitCross('upper1', bands.upper1, currentPrice, previousPositions);
-            checkAndEmitCross('lower1', bands.lower1, currentPrice, previousPositions);
-            checkAndEmitCross('middle', bands.middle, currentPrice, previousPositions);
-
-            // 6. Detect EMA crosses
-            if (latestEMA10) checkAndEmitCrossEMA('ema10', latestEMA10, currentPrice, previousPositionsEMA);
-            if (latestEMA25) checkAndEmitCrossEMA('ema25', latestEMA25, currentPrice, previousPositionsEMA);
-            if (latestEMA50) checkAndEmitCrossEMA('ema50', latestEMA50, currentPrice, previousPositionsEMA);
+                previousPositions[indicatorName] = currentRelPosition;
+            }
 
         } catch (error) {
             console.error('Error in price watcher:', error);
         }
-    }, 15000); // Run every 15 seconds. NOTE: Frequent API calls may lead to rate limiting.
+    }, 15000);
 }
-
 
 // --- Server Startup ---
 async function startServer() {
-    // Configure email service before starting the server
     await configureNodemailer();
 
-    // Ensure database tables are created before starting the server
     console.log("Initializing database...");
     await createEmailsTable();
     await createUsersTable();
@@ -825,7 +876,7 @@ async function startServer() {
         console.log(`Proxy server listening at http://0.0.0.0:${port}`);
         console.log('API endpoint for stocks: /api/data?ticker=7203.T&interval=1d');
         console.log('API endpoint for USD/JPY: /api/usd_jpy_data');
-        startPriceWatcher(); // Start the real-time price watcher
+        startPriceWatcher();
     });
 }
 

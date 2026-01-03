@@ -10836,9 +10836,6 @@
         updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
       }
     }
-    if (updatedBb || updatedEma) {
-      sendCrossNotificationEmail();
-    }
   }
   async function refreshChartData() {
     statusMessage.textContent = `\u66F4\u65B0\u4E2D: ${currentDataType === "stock" ? currentTickers.join(", ") : "USD/JPY"} (${currentInterval}) - \u30C7\u30FC\u30BF\u53D6\u5F97\u4E2D...`;
@@ -11684,7 +11681,6 @@
       if (usdJpyChartObj && usdJpyChartObj.crossHistoryElement) {
         updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
       }
-      await sendCrossNotificationEmail();
       setTimeout(() => {
         notificationElement.classList.add("hidden");
       }, 5e3);
@@ -11698,7 +11694,6 @@
       if (usdJpyChartObj && usdJpyChartObj.emaCrossHistoryElement) {
         updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
       }
-      await sendCrossNotificationEmail();
       setTimeout(() => {
         notificationElement.classList.add("hidden");
       }, 5e3);

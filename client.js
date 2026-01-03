@@ -283,11 +283,6 @@ function checkAndResetCrossPrices() {
             updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
         }
     }
-
-    // Send email if any cross price was reset
-    if (updatedBb || updatedEma) {
-        sendCrossNotificationEmail();
-    }
 }
 
 /**
@@ -1311,9 +1306,6 @@ document.addEventListener('DOMContentLoaded', () => {
               updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
           }
   
-          // Automatically send email when a cross is detected
-          await sendCrossNotificationEmail();
-  
           // Hide the notification after a few seconds
           setTimeout(() => {
               notificationElement.classList.add('hidden');
@@ -1331,7 +1323,6 @@ document.addEventListener('DOMContentLoaded', () => {
             updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
         }
 
-        await sendCrossNotificationEmail();
 
         setTimeout(() => {
             notificationElement.classList.add('hidden');
