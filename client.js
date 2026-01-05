@@ -50,20 +50,17 @@ let areBollingerBandsVisible = true;
 let areEmaVisible = true;
 let currentUserEmail = null;
 let latestCrossPrices = {};
-let latestEmaCrossPrices = {}; // New object to store EMA cross prices
-let sendConditionThreshold = 0.5; // Default reset threshold for BB crosses
-let usdJpyCurrentPrice = null; // Stores the latest USD/JPY price from server updates
-let currentXValue = 0; // Initialize currentXValue
+let latestEmaCrossPrices = {};
+let usdJpyCurrentPrice = null;
+let currentXValue = 0;
+let socket = null; // ===== FIX: avoid implicit global
 
 /**
  * Formats a numeric value to three decimal places.
- * @param {number} value The number to format.
- * @returns {string} The formatted number string.
  */
-const formatValue = (value) => value.toFixed(3);
+const formatValue = (value) => Number(value).toFixed(3);
 
 // --- Helper Function for Aggregating Candlestick Data ---
-// IMPORTANT: This must be in global scope because it is used by multiple functions.
 function aggregateCandleData(data, targetInterval) {
   if (!data || data.length === 0) return [];
 
@@ -109,10 +106,19 @@ function aggregateCandleData(data, targetInterval) {
 }
 
 /**
+ * ===== FIX: chart resize helper
+ * DOM更新でコンテナサイズが変わっても、Lightweight Chartsは自動追従しないので明示的にresizeする。
+ */
+function resizeChartObject(chartObj) {
+  if (!chartObj || !chartObj.chart || !chartObj.container) return;
+  const w = chartObj.container.clientWidth;
+  const h = chartObj.container.clientHeight;
+  if (!w || !h) return;
+  chartObj.chart.resize(w, h);
+}
+
+/**
  * Updates the content of an element to display the latest Bollinger Band values.
- * @param {HTMLElement} element The DOM element to update.
- * @param {Array} bb1 The result array from technicalindicators for 1-sigma BB.
- * @param {Array} bb2 The result array from technicalindicators for 2-sigma BB.
  */
 function updateBbValues(element, bb1, bb2) {
   if (!element || !bb1 || !bb2 || bb1.length === 0 || bb2.length === 0) {
@@ -123,19 +129,17 @@ function updateBbValues(element, bb1, bb2) {
   const latestBb1 = bb1[bb1.length - 1];
   const latestBb2 = bb2[bb2.length - 1];
 
-      element.innerHTML = `
-          <div class="indicator-item"><span>+2σ</span><span>${formatValue(latestBb2.upper)}</span></div>
-          <div class="indicator-item"><span>+1σ</span><span>${formatValue(latestBb1.upper)}</span></div>
-          <div class="indicator-item"><span>0σ</span><span>${formatValue(latestBb1.middle)}</span></div>
-          <div class="indicator-item"><span>-1σ</span><span>${formatValue(latestBb1.lower)}</span></div>
-          <div class="indicator-item"><span>-2σ</span><span>${formatValue(latestBb2.lower)}</span></div>
-      `;}
+  element.innerHTML = `
+    <div class="indicator-item"><span>+2σ</span><span>${formatValue(latestBb2.upper)}</span></div>
+    <div class="indicator-item"><span>+1σ</span><span>${formatValue(latestBb1.upper)}</span></div>
+    <div class="indicator-item"><span>0σ</span><span>${formatValue(latestBb1.middle)}</span></div>
+    <div class="indicator-item"><span>-1σ</span><span>${formatValue(latestBb1.lower)}</span></div>
+    <div class="indicator-item"><span>-2σ</span><span>${formatValue(latestBb2.lower)}</span></div>
+  `;
+}
 
 /**
  * Updates the content of an element to display the latest EMA values.
- * @param {HTMLElement} element The DOM element to update.
- * @param {Array<Array<{time: number, value: number}>>} emaDataArray Array of EMA data series.
- * @param {Array<{period: number, color: string}>} emaPeriods Array of EMA period configurations.
  */
 function updateEmaValues(element, emaDataArray, emaPeriods) {
   if (!element || !emaDataArray || emaDataArray.some((arr) => arr.length === 0)) {
@@ -145,16 +149,15 @@ function updateEmaValues(element, emaDataArray, emaPeriods) {
 
   const latestEmaValues = emaDataArray.map((emaData) => emaData[emaData.length - 1].value);
 
-      element.innerHTML = `
-          <div class="indicator-item"><span>EMA(${emaPeriods[0].period})</span><span>${formatValue(latestEmaValues[0])}</span></div>
-          <div class="indicator-item"><span>EMA(${emaPeriods[1].period})</span><span>${formatValue(latestEmaValues[1])}</span></div>
-          <div class="indicator-item"><span>EMA(${emaPeriods[2].period})</span><span>${formatValue(latestEmaValues[2])}</span></div>
-      `;}
+  element.innerHTML = `
+    <div class="indicator-item"><span>EMA(${emaPeriods[0].period})</span><span>${formatValue(latestEmaValues[0])}</span></div>
+    <div class="indicator-item"><span>EMA(${emaPeriods[1].period})</span><span>${formatValue(latestEmaValues[1])}</span></div>
+    <div class="indicator-item"><span>EMA(${emaPeriods[2].period})</span><span>${formatValue(latestEmaValues[2])}</span></div>
+  `;
+}
 
 /**
- * Updates the content of an element to display the current price and change.
- * @param {HTMLElement} element The DOM element to update.
- * @param {Array<{close: number}>} data The chart data array.
+ * Updates current price display.
  */
 function updateCurrentPriceValue(element, data) {
   if (!element || !data || data.length === 0) {
@@ -166,128 +169,182 @@ function updateCurrentPriceValue(element, data) {
   const currentPrice = latestData.close;
   const previousPrice = data.length > 1 ? data[data.length - 2].close : currentPrice;
   const change = currentPrice - previousPrice;
-  const changePercent = (change / previousPrice) * 100;
+  const changePercent = previousPrice ? (change / previousPrice) * 100 : 0;
   const colorClass = change >= 0 ? 'price-up' : 'price-down';
 
   element.innerHTML = `
-        <span class="price-large ${colorClass}">${formatValue(currentPrice)}</span>
-        <span class="${colorClass}">${change >= 0 ? '+' : ''}${change.toFixed(2)}</span>
-        <span class="${colorClass}">(${change >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)</span>
-    `;
+    <span class="price-large ${colorClass}">${formatValue(currentPrice)}</span>
+    <span class="${colorClass}">${change >= 0 ? '+' : ''}${change.toFixed(2)}</span>
+    <span class="${colorClass}">(${change >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)</span>
+  `;
 }
 
 /**
- * Renders the display for the history of BB cross prices.
- * @param {HTMLElement} element The DOM element to update.
- * @param {object} crossPrices An object holding the latest cross price for each band.
+ * ===== FIX: Layout-stable BB cross history renderer (grid + nowrap)
  */
 function updateCrossHistoryDisplay(element, crossPrices) {
-    let content = '<div class="indicator-group-title">BBクロス履歴</div>';
-    const bands = ['upper2', 'upper1', 'middle', 'lower1', 'lower2'];
-    const bandLabels = {
-        'upper2': '+2σ', 'upper1': '+1σ', 'middle': '0σ',
-        'lower1': '-1σ', 'lower2': '-2σ'
-    };
+  if (!element) return;
 
-    if (Object.keys(crossPrices).length === 0) {
-        content += '<div class="indicator-item"><span>クロス待機中...</span></div>';
-    } else {
-        content += '<div class="cross-item-container">';
-        for (const band of bands) {
-            const price = crossPrices[band] ? formatValue(crossPrices[band]) : '---';
-            content += `
-                <div class="indicator-item">
-                    <span>${bandLabels[band]}</span>
-                    <span>${price}</span>
-                </div>
-            `;
-        }
-        content += '</div>';
-    }
+  // ensure stable block sizing
+  element.style.boxSizing = 'border-box';
+  element.style.minHeight = '72px';
+
+  const bands = ['upper2', 'upper1', 'middle', 'lower1', 'lower2'];
+  const bandLabels = {
+    upper2: '+2σ',
+    upper1: '+1σ',
+    middle: '0σ',
+    lower1: '-1σ',
+    lower2: '-2σ',
+  };
+
+  const hasAny = Object.values(crossPrices || {}).some(
+    (v) => typeof v === 'number' && !Number.isNaN(v)
+  );
+
+  let content = `
+    <div class="indicator-group-title" style="margin-bottom:6px;font-weight:600;">
+      BBクロス履歴
+    </div>
+  `;
+
+  if (!hasAny) {
+    content += `<div class="indicator-item"><span>クロス待機中...</span></div>`;
     element.innerHTML = content;
+    return;
+  }
+
+  content += `
+    <div class="cross-item-container"
+         style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;">
+  `;
+
+  for (const band of bands) {
+    const v = crossPrices?.[band];
+    const price = typeof v === 'number' && !Number.isNaN(v) ? formatValue(v) : '---';
+
+    content += `
+      <div class="indicator-item"
+           style="display:flex;justify-content:space-between;gap:8px;white-space:nowrap;overflow:hidden;">
+        <span style="opacity:0.85;">${bandLabels[band]}</span>
+        <span style="font-variant-numeric:tabular-nums;">${price}</span>
+      </div>
+    `;
+  }
+
+  content += `</div>`;
+  element.innerHTML = content;
 }
 
 /**
- * Renders the display for the history of EMA cross prices.
- * @param {HTMLElement} element The DOM element to update.
- * @param {object} crossPrices An object holding the latest cross price for each EMA.
+ * ===== FIX: Layout-stable EMA cross history renderer (grid + nowrap)
  */
 function updateEmaCrossHistoryDisplay(element, crossPrices) {
-    let content = '<div class="indicator-group-title">EMAクロス履歴</div>';
-    const emas = ['ema10', 'ema25', 'ema50'];
-    const emaLabels = {
-        'ema10': 'EMA(10)', 'ema25': 'EMA(25)', 'ema50': 'EMA(50)'
-    };
+  if (!element) return;
 
-    if (Object.keys(crossPrices).length === 0) {
-        content += '<div class="indicator-item"><span>クロス待機中...</span></div>';
-    } else {
-        content += '<div class="cross-item-container">';
-        for (const ema of emas) {
-            const price = crossPrices[ema] ? formatValue(crossPrices[ema]) : '---';
-            content += `
-                <div class="indicator-item">
-                    <span>${emaLabels[ema]}</span>
-                    <span>${price}</span>
-                </div>
-            `;
-        }
-        content += '</div>';
-    }
+  element.style.boxSizing = 'border-box';
+  element.style.minHeight = '72px';
+
+  const emas = ['ema10', 'ema25', 'ema50'];
+  const emaLabels = {
+    ema10: 'EMA(10)',
+    ema25: 'EMA(25)',
+    ema50: 'EMA(50)',
+  };
+
+  const hasAny = Object.values(crossPrices || {}).some(
+    (v) => typeof v === 'number' && !Number.isNaN(v)
+  );
+
+  let content = `
+    <div class="indicator-group-title" style="margin-bottom:6px;font-weight:600;">
+      EMAクロス履歴
+    </div>
+  `;
+
+  if (!hasAny) {
+    content += `<div class="indicator-item"><span>クロス待機中...</span></div>`;
     element.innerHTML = content;
+    return;
+  }
+
+  content += `
+    <div class="cross-item-container"
+         style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;">
+  `;
+
+  for (const ema of emas) {
+    const v = crossPrices?.[ema];
+    const price = typeof v === 'number' && !Number.isNaN(v) ? formatValue(v) : '---';
+
+    content += `
+      <div class="indicator-item"
+           style="display:flex;justify-content:space-between;gap:8px;white-space:nowrap;overflow:hidden;">
+        <span style="opacity:0.85;">${emaLabels[ema]}</span>
+        <span style="font-variant-numeric:tabular-nums;">${price}</span>
+      </div>
+    `;
+  }
+
+  content += `</div>`;
+  element.innerHTML = content;
 }
 
 /**
  * Checks if the current USD/JPY price has moved beyond the reset threshold
- * from any recorded BB cross price and resets them if so.
+ * from any recorded cross price and resets them if so.
  */
 function checkAndResetCrossPrices() {
-    if (usdJpyCurrentPrice === null) return; // No current price to compare against
+  if (usdJpyCurrentPrice === null || currentXValue <= 0) return;
 
-    let updatedBb = false;
-    const bbBands = ['upper2', 'upper1', 'middle', 'lower1', 'lower2'];
-    for (const band of bbBands) {
-        if (latestCrossPrices[band] !== null && latestCrossPrices[band] !== undefined) {
-            if (Math.abs(usdJpyCurrentPrice - latestCrossPrices[band]) >= sendConditionThreshold) {
-                console.log(`Resetting ${band} BB cross price. Current: ${usdJpyCurrentPrice}, Cross: ${latestCrossPrices[band]}, Threshold: ${sendConditionThreshold}`);
-                latestCrossPrices[band] = null;
-                updatedBb = true;
-            }
-        }
+  let updatedBb = false;
+  const bbBands = ['upper2', 'upper1', 'middle', 'lower1', 'lower2'];
+  for (const band of bbBands) {
+    if (latestCrossPrices[band] !== null && latestCrossPrices[band] !== undefined) {
+      if (Math.abs(usdJpyCurrentPrice - latestCrossPrices[band]) >= currentXValue) {
+        latestCrossPrices[band] = null;
+        updatedBb = true;
+      }
     }
+  }
 
-    if (updatedBb) {
-        const usdJpyChartObj = chartObjects.find(obj => obj.ticker === 'USDJPY=X');
-        if (usdJpyChartObj && usdJpyChartObj.crossHistoryElement) {
-            updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
-        }
+  if (updatedBb) {
+    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
+    if (usdJpyChartObj?.crossHistoryElement) {
+      updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
+      // ===== FIX: resize after DOM update
+      requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
     }
+  }
 
-    let updatedEma = false;
-    const emaBands = ['ema10', 'ema25', 'ema50'];
-    for (const ema of emaBands) {
-        if (latestEmaCrossPrices[ema] !== null && latestEmaCrossPrices[ema] !== undefined) {
-            if (Math.abs(usdJpyCurrentPrice - latestEmaCrossPrices[ema]) >= sendConditionThreshold) {
-                console.log(`Resetting ${ema} EMA cross price. Current: ${usdJpyCurrentPrice}, Cross: ${latestEmaCrossPrices[ema]}, Threshold: ${sendConditionThreshold}`);
-                latestEmaCrossPrices[ema] = null;
-                updatedEma = true;
-            }
-        }
+  let updatedEma = false;
+  const emaBands = ['ema10', 'ema25', 'ema50'];
+  for (const ema of emaBands) {
+    if (latestEmaCrossPrices[ema] !== null && latestEmaCrossPrices[ema] !== undefined) {
+      if (Math.abs(usdJpyCurrentPrice - latestEmaCrossPrices[ema]) >= currentXValue) {
+        latestEmaCrossPrices[ema] = null;
+        updatedEma = true;
+      }
     }
+  }
 
-    if (updatedEma) {
-        const usdJpyChartObj = chartObjects.find(obj => obj.ticker === 'USDJPY=X');
-        if (usdJpyChartObj && usdJpyChartObj.emaCrossHistoryElement) {
-            updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
-        }
+  if (updatedEma) {
+    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
+    if (usdJpyChartObj?.emaCrossHistoryElement) {
+      updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
+      // ===== FIX: resize after DOM update
+      requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
     }
+  }
 }
 
 /**
  * Refreshes data for all active charts and updates their series.
  */
 async function refreshChartData() {
-  statusMessage.textContent = `更新中: ${currentDataType === 'stock' ? currentTickers.join(', ') : 'USD/JPY'} (${currentInterval}) - データ取得中...`;
+  statusMessage.textContent = `更新中: ${
+    currentDataType === 'stock' ? currentTickers.join(', ') : 'USD/JPY'
+  } (${currentInterval}) - データ取得中...`;
 
   for (const chartObj of chartObjects) {
     if (!chartObj) continue;
@@ -300,34 +357,26 @@ async function refreshChartData() {
         data = await fetchUsdJpyData(chartObj.interval);
       }
 
-      // Update current price display (before aggregation)
       updateCurrentPriceValue(chartObj.currentPriceValuesElement, data);
 
-      if (!data || data.length < 20) {
-        console.warn(`Not enough data to update indicators for ${chartObj.ticker}.`);
-        continue;
-      }
+      if (!data || data.length < 20) continue;
 
       if (currentInterval === '4h' || currentInterval === '8h') {
         data = aggregateCandleData(data, currentInterval);
       }
-
-      if (!data || data.length < 20) {
-        console.warn(`Not enough aggregated data to update indicators for ${chartObj.ticker}.`);
-        continue;
-      }
+      if (!data || data.length < 20) continue;
 
       const closePrices = data.map((d) => d.close);
 
       // Bollinger Bands
       const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
+      const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
       const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
-      const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
+      const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
 
       const bb1 = BollingerBands.calculate(bbInput1);
       const bb2 = BollingerBands.calculate(bbInput2);
 
-      // Update BB values display
       updateBbValues(chartObj.bbValuesElement, bb1, bb2);
 
       // EMAs
@@ -344,7 +393,6 @@ async function refreshChartData() {
         return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
       });
 
-      // Update EMA values display
       updateEmaValues(chartObj.emaValuesElement, emaDataArray, emaPeriods);
 
       // Align BB with candles
@@ -355,7 +403,6 @@ async function refreshChartData() {
       const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
       const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
 
-      // Update series
       chartObj.candleSeries.setData(data);
       chartObj.middleBandSeries.setData(middleBandData);
       chartObj.upperBand1Series.setData(upperBand1Data);
@@ -368,17 +415,29 @@ async function refreshChartData() {
           emaSeries.setData(emaDataArray[index]);
         });
       }
+
+      // SMA(1) = close
+      const sma1Data = data.map((d) => ({ time: d.time, value: d.close }));
+      if (chartObj.sma1Series) {
+        chartObj.sma1Series.setData(sma1Data);
+      }
+
+      // ===== FIX: if DOM metrics changed subtly, keep chart fitted
+      resizeChartObject(chartObj);
     } catch (error) {
       console.error(`Failed to refresh data for ${chartObj.ticker}:`, error);
       statusMessage.textContent = `エラー: ${chartObj.ticker} のデータ更新に失敗しました。`;
     }
   }
 
-  statusMessage.textContent = `表示中: ${currentDataType === 'stock' ? currentTickers.join(', ') : 'USD/JPY'} (${currentInterval}) - 60秒ごとに更新`;
+  statusMessage.textContent = `表示中: ${
+    currentDataType === 'stock' ? currentTickers.join(', ') : 'USD/JPY'
+  } (${currentInterval}) - 60秒ごとに更新`;
 }
 
 // --- Interval Options ---
 const stockIntervalOptions = [
+  { value: '1m', text: '1分' },
   { value: '5m', text: '5分' },
   { value: '15m', text: '15分' },
   { value: '30m', text: '30分' },
@@ -390,6 +449,7 @@ const stockIntervalOptions = [
 ];
 
 const usdJpyIntervalOptions = [
+  { value: '1m', text: '1分' },
   { value: '5m', text: '5分' },
   { value: '15m', text: '15分' },
   { value: '30m', text: '30分' },
@@ -455,11 +515,7 @@ function createChart(container, options = {}) {
 }
 
 function updateTickerInputVisibility() {
-  if (currentDataType === 'usd_jpy') {
-    tickersInputGroup.style.display = 'none';
-  } else {
-    tickersInputGroup.style.display = 'flex';
-  }
+  tickersInputGroup.style.display = currentDataType === 'usd_jpy' ? 'none' : 'flex';
 }
 
 function toggleBollingerBandsVisibility() {
@@ -520,43 +576,37 @@ async function renderChartForTicker(ticker, interval) {
   const wrapper = document.createElement('div');
   wrapper.className = 'chart-wrapper';
   wrapper.innerHTML = `
-        <h2 class="chart-title">${ticker}</h2>
-        <div class="chart-container" id="ohlc-${sanitizedTicker}"></div>
-        <div class="current-price-values" id="current-price-${sanitizedTicker}"></div>
-        <div class="bb-values" id="bb-values-${sanitizedTicker}"></div>
-        <div class="ema-values" id="ema-values-${sanitizedTicker}"></div>
-        <div class="cross-history" id="cross-history-${sanitizedTicker}"></div>
-    `;
+    <h2 class="chart-title">${ticker}</h2>
+    <div class="chart-container" id="ohlc-${sanitizedTicker}"></div>
+    <div class="current-price-values" id="current-price-${sanitizedTicker}"></div>
+    <div class="bb-values" id="bb-values-${sanitizedTicker}"></div>
+    <div class="ema-values" id="ema-values-${sanitizedTicker}"></div>
+    <div class="cross-history" id="cross-history-${sanitizedTicker}"></div>
+  `;
   chartsContainer.appendChild(wrapper);
 
   let data;
   try {
     data = await fetchStockData(ticker, interval);
-    if (interval === '4h' || interval === '8h') {
-      data = aggregateCandleData(data, interval);
-    }
-    if (!data || data.length < 20) {
-      throw new Error('Not enough data to calculate indicators.');
-    }
+    if (interval === '4h' || interval === '8h') data = aggregateCandleData(data, interval);
+    if (!data || data.length < 20) throw new Error('Not enough data to calculate indicators.');
   } catch (error) {
     wrapper.querySelector(`#ohlc-${sanitizedTicker}`).innerText = `Error loading data for ${ticker}: ${error.message}`;
     return null;
   }
 
-  // Update current price display
   const currentPriceValuesElement = wrapper.querySelector(`#current-price-${sanitizedTicker}`);
   updateCurrentPriceValue(currentPriceValuesElement, data);
 
   const closePrices = data.map((d) => d.close);
 
   const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
+  const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
   const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
-  const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
-
+  const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
   const bb1 = BollingerBands.calculate(bbInput1);
   const bb2 = BollingerBands.calculate(bbInput2);
 
-  // Update BB values display
   const bbValuesElement = wrapper.querySelector(`#bb-values-${sanitizedTicker}`);
   updateBbValues(bbValuesElement, bb1, bb2);
 
@@ -573,7 +623,6 @@ async function renderChartForTicker(ticker, interval) {
     return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
   });
 
-  // Update EMA values display
   const emaValuesElement = wrapper.querySelector(`#ema-values-${sanitizedTicker}`);
   updateEmaValues(emaValuesElement, emaDataArray, emaPeriods);
 
@@ -612,6 +661,18 @@ async function renderChartForTicker(ticker, interval) {
     return emaSeries;
   });
 
+  const sma1Data = data.map((d) => ({ time: d.time, value: d.close }));
+  const sma1Series = ohlcChart.addLineSeries({
+    color: 'cyan',
+    lineWidth: 1,
+    title: 'SMA(1)',
+    crosshairMarkerVisible: false,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    visible: true,
+  });
+  sma1Series.setData(sma1Data);
+
   const candleSeries = ohlcChart.addCandlestickSeries({
     upColor: '#ff4c4c',
     downColor: '#4c6aff',
@@ -624,17 +685,18 @@ async function renderChartForTicker(ticker, interval) {
   return {
     chart: ohlcChart,
     container: wrapper.querySelector(`#ohlc-${sanitizedTicker}`),
-            currentPriceValuesElement,
-            bbValuesElement,
-            emaValuesElement,
-            // Add a placeholder for crossHistoryElement for consistency, even if not used for stocks
-            crossHistoryElement: wrapper.querySelector(`#cross-history-${sanitizedTicker}`),
-            candleSeries,
-            middleBandSeries,    upperBand1Series,
+    currentPriceValuesElement,
+    bbValuesElement,
+    emaValuesElement,
+    crossHistoryElement: wrapper.querySelector(`#cross-history-${sanitizedTicker}`),
+    candleSeries,
+    middleBandSeries,
+    upperBand1Series,
     lowerBand1Series,
     upperBand2Series,
     lowerBand2Series,
     emaSeriesArray,
+    sma1Series,
     ticker,
     interval,
   };
@@ -654,22 +716,14 @@ async function renderChartForUsdJpy(interval) {
     const wrapper = document.createElement('div');
     wrapper.className = 'chart-wrapper';
     wrapper.innerHTML = `
-            <h2 class="chart-title">USD/JPY</h2>
-            <div class="chart-container" id="usd-jpy-chart"></div>
-            <div class="current-price-values" id="current-price-usdjpy"></div>
-            <div class="bb-values" id="bb-values-usdjpy"></div>
-            <div class="ema-values" id="ema-values-usdjpy"></div>
-            <div class="cross-history" id="cross-history-usdjpy"></div>
-            <div class="cross-history" id="ema-cross-history-usdjpy"></div>
-            <div class="cross-reset-settings">
-                <label for="cross-reset-threshold-input" class="form-label">送信条件 (±円)</label>
-                <span id="current-send-condition-threshold-display" class="value-display">現在の送信条件: --</span>
-                <div class="input-group">
-                    <input type="number" id="cross-reset-threshold-input" class="form-input" step="0.001" min="0.01">
-                    <button id="apply-cross-reset-button" class="btn btn-secondary">適用</button>
-                </div>
-            </div>
-        `;
+      <h2 class="chart-title">USD/JPY</h2>
+      <div class="chart-container" id="usd-jpy-chart"></div>
+      <div class="current-price-values" id="current-price-usdjpy"></div>
+      <div class="bb-values" id="bb-values-usdjpy"></div>
+      <div class="ema-values" id="ema-values-usdjpy"></div>
+      <div class="cross-history" id="cross-history-usdjpy"></div>
+      <div class="cross-history" id="ema-cross-history-usdjpy"></div>
+    `;
     chartsContainer.appendChild(wrapper);
 
     let data;
@@ -693,9 +747,8 @@ async function renderChartForUsdJpy(interval) {
         wrapper.querySelector(`#usd-jpy-chart`).innerText = `${errorMessage} 日足データも取得できませんでした。`;
         return null;
       }
-    } // ★ここが欠けてた閉じカッコ。構文エラー原因
+    }
 
-    // Update current price display
     const currentPriceValuesElement = wrapper.querySelector('#current-price-usdjpy');
     updateCurrentPriceValue(currentPriceValuesElement, data);
 
@@ -710,13 +763,13 @@ async function renderChartForUsdJpy(interval) {
     const closePrices = data.map((d) => d.close);
 
     const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
+    const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
     const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
-    const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
+    const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
 
     const bb1 = BollingerBands.calculate(bbInput1);
     const bb2 = BollingerBands.calculate(bbInput2);
 
-    // Update BB values display
     const bbValuesElement = wrapper.querySelector('#bb-values-usdjpy');
     updateBbValues(bbValuesElement, bb1, bb2);
 
@@ -733,17 +786,15 @@ async function renderChartForUsdJpy(interval) {
       return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
     });
 
-            // Update EMA values display
-            const emaValuesElement = wrapper.querySelector('#ema-values-usdjpy');
-            updateEmaValues(emaValuesElement, emaDataArray, emaPeriods);
-    
-            // Update cross history display
-            const crossHistoryElement = wrapper.querySelector('#cross-history-usdjpy');
-            updateCrossHistoryDisplay(crossHistoryElement, latestCrossPrices);
+    const emaValuesElement = wrapper.querySelector('#ema-values-usdjpy');
+    updateEmaValues(emaValuesElement, emaDataArray, emaPeriods);
 
-            // Update EMA cross history display
-            const emaCrossHistoryElement = wrapper.querySelector('#ema-cross-history-usdjpy');
-            updateEmaCrossHistoryDisplay(emaCrossHistoryElement, latestEmaCrossPrices);
+    const crossHistoryElement = wrapper.querySelector('#cross-history-usdjpy');
+    updateCrossHistoryDisplay(crossHistoryElement, latestCrossPrices);
+
+    const emaCrossHistoryElement = wrapper.querySelector('#ema-cross-history-usdjpy');
+    updateEmaCrossHistoryDisplay(emaCrossHistoryElement, latestEmaCrossPrices);
+
     const dataOffset = data.length - bb1.length;
     const middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
     const upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
@@ -779,6 +830,18 @@ async function renderChartForUsdJpy(interval) {
       return emaSeries;
     });
 
+    const sma1Data = data.map((d) => ({ time: d.time, value: d.close }));
+    const sma1Series = usdJpyChart.addLineSeries({
+      color: 'cyan',
+      lineWidth: 1,
+      title: 'SMA(1)',
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: true,
+    });
+    sma1Series.setData(sma1Data);
+
     const candleSeries = usdJpyChart.addCandlestickSeries({
       upColor: '#ff4c4c',
       downColor: '#4c6aff',
@@ -790,40 +853,6 @@ async function renderChartForUsdJpy(interval) {
 
     usdJpyChart.timeScale().fitContent();
 
-    const currentSendConditionThresholdDisplay = wrapper.querySelector('#current-send-condition-threshold-display');
-    if (currentSendConditionThresholdDisplay) {
-        currentSendConditionThresholdDisplay.textContent = `現在の送信条件: ${sendConditionThreshold.toFixed(3)}`;
-    }
-
-    // Moved from DOMContentLoaded: Setup for cross-reset-threshold
-    const crossResetThresholdInput = wrapper.querySelector('#cross-reset-threshold-input');
-    const applyCrossResetButton = wrapper.querySelector('#apply-cross-reset-button');
-
-    if (crossResetThresholdInput) {
-        crossResetThresholdInput.value = sendConditionThreshold.toFixed(3); // Set initial value for input field
-    }
-
-    if (applyCrossResetButton) {
-        applyCrossResetButton.addEventListener('click', async () => {
-            if (crossResetThresholdInput) {
-                sendConditionThreshold = parseFloat(crossResetThresholdInput.value);
-                console.log('BB Reset Threshold updated to:', sendConditionThreshold);
-                checkAndResetCrossPrices(); // Re-check immediately with new threshold
-                saveUserSettings(); // Persist the new threshold
-
-                // Set xValueInput and then save it as x_value (existing logic)
-                xValueInput.value = sendConditionThreshold;
-                await saveUserXValue(); // Call the function to save it as x_value
-
-                if (currentSendConditionThresholdDisplay) {
-                    currentSendConditionThresholdDisplay.textContent = `現在の送信条件: ${sendConditionThreshold.toFixed(3)}`;
-                }
-                // Update the input field to reflect the newly applied value
-                crossResetThresholdInput.value = sendConditionThreshold.toFixed(3);
-            }
-        });
-    }
-
     return {
       chart: usdJpyChart,
       container: wrapper.querySelector(`#usd-jpy-chart`),
@@ -831,7 +860,7 @@ async function renderChartForUsdJpy(interval) {
       bbValuesElement,
       emaValuesElement,
       crossHistoryElement,
-      emaCrossHistoryElement, // Add emaCrossHistoryElement here
+      emaCrossHistoryElement,
       candleSeries,
       middleBandSeries,
       upperBand1Series,
@@ -839,6 +868,7 @@ async function renderChartForUsdJpy(interval) {
       upperBand2Series,
       lowerBand2Series,
       emaSeriesArray,
+      sma1Series,
       ticker: 'USDJPY=X',
       interval: actualInterval,
     };
@@ -849,51 +879,44 @@ async function renderChartForUsdJpy(interval) {
 
 /**
  * Main function to start/update the charting process.
- * @param {string} dataType The type of data to display ('stock' or 'usd_jpy').
  */
 async function start(dataType) {
-  console.log('start function called with dataType:', dataType);
+  if (updateIntervalId) clearInterval(updateIntervalId);
 
-  if (updateIntervalId) {
-    clearInterval(updateIntervalId);
-  }
+  currentInterval = intervalSelect.value;
+  chartsContainer.innerHTML = '';
+  chartObjects = [];
+  latestCrossPrices = {};
+  latestEmaCrossPrices = {};
+  usdJpyCurrentPrice = null;
 
-          chartsContainer.innerHTML = '';
-          chartObjects = [];
-          latestCrossPrices = {};
-          usdJpyCurrentPrice = null; // Reset current price on chart start
-          statusMessage.textContent = 'チャートを読み込んでいます...';  currentDataType = dataType;
+  statusMessage.textContent = 'チャートを読み込んでいます...';
+  currentDataType = dataType;
 
   if (dataType === 'stock') {
     currentTickers = tickersInput.value.split(',').map((t) => t.trim()).filter((t) => t);
     currentInterval = intervalSelect.value;
 
     const formattedTickers = currentTickers.map((c) => (c.endsWith('.T') ? c : `${c}.T`));
-
     await renderChartsForStocks(formattedTickers, currentInterval);
-    statusMessage.textContent = `表示中: ${formattedTickers.join(', ')} (${currentInterval}) - 60秒ごとに更新`;
-    updateIntervalId = setInterval(refreshChartData, 60 * 1000);
+
+    statusMessage.textContent = `表示中: ${formattedTickers.join(', ')} (${currentInterval}) - 30秒ごとに更新`;
+    updateIntervalId = setInterval(refreshChartData, 30 * 1000);
   } else if (dataType === 'usd_jpy') {
     currentTickers = ['USDJPY=X'];
     currentInterval = intervalSelect.value;
 
     const usdJpyChartObj = await renderChartForUsdJpy(currentInterval);
-    if (usdJpyChartObj) {
-      chartObjects.push(usdJpyChartObj);
-    }
+    if (usdJpyChartObj) chartObjects.push(usdJpyChartObj);
 
-    statusMessage.textContent = `表示中: USD/JPY (${currentInterval}) - 60秒ごとに更新`;
-    updateIntervalId = setInterval(refreshChartData, 60 * 1000);
+    statusMessage.textContent = `表示中: USD/JPY (${currentInterval}) - 30秒ごとに更新`;
+    updateIntervalId = setInterval(refreshChartData, 30 * 1000);
   }
 }
 
 // --- Event Listeners ---
 window.addEventListener('resize', () => {
-  chartObjects.forEach((obj) => {
-    if (!obj) return;
-    const { container, chart } = obj;
-    chart.resize(container.clientWidth, container.clientHeight);
-  });
+  chartObjects.forEach((obj) => resizeChartObject(obj));
 });
 
 startButton.addEventListener('click', () => {
@@ -911,11 +934,9 @@ toggleEmaButton.addEventListener('click', () => {
   saveUserSettings();
 });
 
-// Modify applyIndicatorsButton event listener（これを唯一の applyIndicators リスナーにする）
 applyIndicatorsButton.addEventListener('click', () => {
   start(currentDataType);
   saveUserSettings();
-  sendBbSettingsToServer(); // Send updated settings to server
 });
 
 intervalSelect.addEventListener('change', () => {
@@ -943,7 +964,7 @@ subscribeButton.addEventListener('click', async () => {
     if (response.ok) {
       statusMessage.textContent = result.message;
       emailInput.value = '';
-      await refreshEmailList(); // Refresh the list, which will also update the button
+      await refreshEmailList();
     } else {
       throw new Error(result.error || '登録に失敗しました。');
     }
@@ -969,7 +990,7 @@ async function deleteEmail(email) {
     const result = await response.json();
     if (response.ok) {
       statusMessage.textContent = result.message;
-      await refreshEmailList(); // Also updates button visibility
+      await refreshEmailList();
     } else {
       throw new Error(result.error || '削除に失敗しました。');
     }
@@ -1001,7 +1022,6 @@ async function refreshEmailList() {
 
         li.classList.add('email-list-item');
 
-        // Add delete button if the email matches the current user
         if (currentUserEmail && item.email === currentUserEmail) {
           const deleteButton = document.createElement('button');
           deleteButton.textContent = '削除';
@@ -1066,19 +1086,19 @@ usdJpyToggle.addEventListener('click', () => {
 
 // --- User Settings Functions ---
 async function saveUserSettings() {
-      const settings = {
-          currentDataType,
-          currentInterval: intervalSelect.value,
-          tickersInput: tickersInput.value,
-          areBollingerBandsVisible,
-          areEmaVisible,
-          bbPeriod: bbPeriodInput.value,
-          bbStdDev: bbStdDevInput.value,
-          ema1Period: ema1PeriodInput.value,
-          ema2Period: ema2PeriodInput.value,
-          ema3Period: ema3PeriodInput.value,
-          sendConditionThreshold: sendConditionThreshold, // Add this line
-      };
+  const settings = {
+    currentDataType,
+    currentInterval: intervalSelect.value,
+    tickersInput: tickersInput.value,
+    areBollingerBandsVisible,
+    areEmaVisible,
+    bbPeriod: bbPeriodInput.value,
+    bbStdDev: bbStdDevInput.value,
+    ema1Period: ema1PeriodInput.value,
+    ema2Period: ema2PeriodInput.value,
+    ema3Period: ema3PeriodInput.value,
+  };
+
   try {
     const response = await fetch('/api/user/settings', {
       method: 'POST',
@@ -1107,14 +1127,8 @@ async function loadUserSettings() {
         ema1PeriodInput.value = settings.ema1Period || '10';
         ema2PeriodInput.value = settings.ema2Period || '25';
         ema3PeriodInput.value = settings.ema3Period || '50';
-        sendConditionThreshold = settings.sendConditionThreshold !== undefined ? settings.sendConditionThreshold : 0.5; // Load sendConditionThreshold
 
-        // Update the input field with the loaded value
-        const crossResetThresholdInput = document.getElementById('cross-reset-threshold-input');
-        if (crossResetThresholdInput) {
-            crossResetThresholdInput.value = sendConditionThreshold.toFixed(3);
-        }
-        checkAndResetCrossPrices(); // Apply the loaded threshold immediately
+        checkAndResetCrossPrices();
 
         if (currentDataType === 'stock') {
           stockToggle.classList.add('active');
@@ -1125,6 +1139,7 @@ async function loadUserSettings() {
           stockToggle.classList.remove('active');
           updateIntervalOptions(usdJpyIntervalOptions, intervalSelect.value);
         }
+
         updateTickerInputVisibility();
         toggleBbButton.textContent = areBollingerBandsVisible ? 'BB非表示' : 'BB表示';
         toggleEmaButton.textContent = areEmaVisible ? 'EMA非表示' : 'EMA表示';
@@ -1149,12 +1164,11 @@ async function fetchUserXValue() {
     const response = await fetch('/api/user/x_value');
     if (response.ok) {
       const data = await response.json();
-      currentXValue = parseFloat(data.x_value); // Parse as float
-      currentXValueSpan.textContent = `現在のX値: ${currentXValue.toFixed(3)}`; // Format for display
-      xValueInput.value = currentXValue.toFixed(3); // Format for input field
+      currentXValue = parseFloat(data.x_value);
+      currentXValueSpan.textContent = `現在のX値: ${currentXValue.toFixed(3)}`;
+      xValueInput.value = currentXValue.toFixed(3);
       xValueControls.classList.remove('hidden');
     } else {
-      console.error('Failed to fetch user x_value.');
       xValueControls.classList.add('hidden');
     }
   } catch (error) {
@@ -1164,12 +1178,11 @@ async function fetchUserXValue() {
 }
 
 async function saveUserXValue() {
-  const newXValue = parseFloat(xValueInput.value); // Use parseFloat
+  const newXValue = parseFloat(xValueInput.value);
   if (isNaN(newXValue)) {
     alert('有効な数値を入力してください。');
     return;
   }
-  console.log('Attempting to save x_value:', newXValue); // Log the value being sent
 
   try {
     const response = await fetch('/api/user/x_value', {
@@ -1177,20 +1190,17 @@ async function saveUserXValue() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ x_value: newXValue }),
     });
-    console.log('Response status from /api/user/x_value:', response.status); // Log the response status
+
     if (response.ok) {
       const data = await response.json();
-      currentXValue = parseFloat(data.x_value); // Parse as float
-      currentXValueSpan.textContent = `現在のX値: ${currentXValue.toFixed(3)}`; // Format for display
-      // alert('X値が保存されました！'); // Removed as per user request
+      currentXValue = parseFloat(data.x_value);
+      currentXValueSpan.textContent = `現在のX値: ${currentXValue.toFixed(3)}`;
     } else {
       const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
       console.error('Error saving x_value:', errorData.error);
-      // alert('X値の保存に失敗しました。'); // Removed as per user request
     }
   } catch (error) {
     console.error('Network error saving user x_value:', error);
-    // alert('ネットワークエラーが発生しました。'); // Removed as per user request
   }
 }
 
@@ -1200,31 +1210,31 @@ async function checkAuthStatus() {
     if (response.ok) {
       const data = await response.json();
       userInfoSpan.textContent = `ようこそ、${data.user.username}さん！`;
-      currentUserEmail = data.user.email; // Store user's email
+      currentUserEmail = data.user.email;
       userInfoSpan.classList.remove('hidden');
       loginButton.classList.add('hidden');
       registerButton.classList.add('hidden');
       logoutButton.classList.remove('hidden');
 
-      fetchUserXValue(); // Fetch and display x_value
+      fetchUserXValue();
       loadUserSettings();
     } else {
-      currentUserEmail = null; // Clear email on failed auth
+      currentUserEmail = null;
       userInfoSpan.classList.add('hidden');
       loginButton.classList.remove('hidden');
       registerButton.classList.remove('hidden');
       logoutButton.classList.add('hidden');
-      xValueControls.classList.add('hidden'); // Hide x_value controls
+      xValueControls.classList.add('hidden');
       start(currentDataType);
     }
   } catch (error) {
-    currentUserEmail = null; // Clear email on error
+    currentUserEmail = null;
     console.error('Failed to check authentication status:', error);
     userInfoSpan.classList.add('hidden');
     loginButton.classList.remove('hidden');
     registerButton.classList.remove('hidden');
     logoutButton.classList.add('hidden');
-    xValueControls.classList.add('hidden'); // Hide x_value controls
+    xValueControls.classList.add('hidden');
     start(currentDataType);
   }
 }
@@ -1235,9 +1245,9 @@ async function handleLogout() {
     const data = await response.json();
     if (response.ok) {
       alert(data.message || 'ログアウトしました。');
-      currentUserEmail = null; // Clear email on logout
-      xValueControls.classList.add('hidden'); // Hide x_value controls
-      await checkAuthStatus(); // Re-check status, which will hide the button
+      currentUserEmail = null;
+      xValueControls.classList.add('hidden');
+      await checkAuthStatus();
     } else {
       alert(data.error || 'ログアウトに失敗しました。');
     }
@@ -1248,7 +1258,7 @@ async function handleLogout() {
 }
 
 logoutButton.addEventListener('click', handleLogout);
-saveXValueButton.addEventListener('click', saveUserXValue); // Add event listener for save x_value button
+saveXValueButton.addEventListener('click', saveUserXValue);
 
 // --- Initial Load ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -1259,6 +1269,7 @@ document.addEventListener('DOMContentLoaded', () => {
     usdJpyToggle.classList.add('active');
     updateIntervalOptions(usdJpyIntervalOptions, '1d');
   }
+
   updateTickerInputVisibility();
   checkAuthStatus();
 
@@ -1268,60 +1279,59 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('Connected to WebSocket server!');
   });
 
-      socket.on('bb_cross', async (data) => {
-          console.log('BB Cross event received:', data);
-          notificationElement.textContent = data.message; // Use the message directly from server
-          notificationElement.classList.remove('hidden');
-  
-          // Update cross price history
-          latestCrossPrices[data.bandName] = data.price;
-  
-          // Find the USD/JPY chart object and update its display
-          const usdJpyChartObj = chartObjects.find(obj => obj.ticker === 'USDJPY=X');
-          if (usdJpyChartObj && usdJpyChartObj.crossHistoryElement) {
-              updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
-          }
-  
-          // Hide the notification after a few seconds
-          setTimeout(() => {
-              notificationElement.classList.add('hidden');
-          }, 5000); // Hide after 5 seconds
-      });
-      socket.on('ema_cross', async (data) => {
-        console.log('EMA Cross event received:', data);
-        notificationElement.textContent = data.message;
-        notificationElement.classList.remove('hidden');
+  socket.on('bb_cross', async (data) => {
+    console.log('BB Cross event received:', data);
 
-        latestEmaCrossPrices[data.emaName] = data.price;
+    notificationElement.textContent = data.message;
+    notificationElement.classList.remove('hidden');
 
-        const usdJpyChartObj = chartObjects.find(obj => obj.ticker === 'USDJPY=X');
-        if (usdJpyChartObj && usdJpyChartObj.emaCrossHistoryElement) { // Use new emaCrossHistoryElement
-            updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
-        }
+    latestCrossPrices[data.bandName] = data.price;
 
+    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
+    if (usdJpyChartObj?.crossHistoryElement) {
+      updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
 
-        setTimeout(() => {
-            notificationElement.classList.add('hidden');
-        }, 5000);
-      });
-      socket.on('disconnect', () => {
-          console.log('Disconnected from WebSocket server.');
-      });
-  
-      // Listen for real-time USD/JPY price updates
-      socket.on('usd_jpy_price_update', (data) => {
-          usdJpyCurrentPrice = data.price;
-          checkAndResetCrossPrices();
-      });
-  
-                    // Event listener for the reset threshold input and button (now handled within renderChartForUsdJpy)
-  
-                    // Removed global setup here as elements are dynamic
-  
-                });
+      // ===== FIX: resize after DOM update (prevents layout break)
+      requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
+    }
 
-// Modify applyIndicatorsButton event listener
-applyIndicatorsButton.addEventListener('click', () => {
-  start(currentDataType);
-  saveUserSettings();
+    setTimeout(() => {
+      notificationElement.classList.add('hidden');
+    }, 5000);
+  });
+
+  socket.on('ema_cross', async (data) => {
+    console.log('EMA Cross event received:', data);
+
+    notificationElement.textContent = data.message;
+    notificationElement.classList.remove('hidden');
+
+    latestEmaCrossPrices[data.emaName] = data.price;
+
+    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
+    if (usdJpyChartObj?.emaCrossHistoryElement) {
+      updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
+
+      // ===== FIX: resize after DOM update (prevents layout break)
+      requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
+    }
+
+    setTimeout(() => {
+      notificationElement.classList.add('hidden');
+    }, 5000);
+  });
+
+  socket.on('disconnect', () => {
+    console.log('Disconnected from WebSocket server.');
+  });
+
+  socket.on('usd_jpy_price_update', (data) => {
+    usdJpyCurrentPrice = data.price;
+    checkAndResetCrossPrices();
+
+    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
+    if (usdJpyChartObj?.currentPriceValuesElement) {
+      updateCurrentPriceValue(usdJpyChartObj.currentPriceValuesElement, [{ close: data.price }]);
+    }
+  });
 });
