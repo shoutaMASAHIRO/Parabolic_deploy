@@ -1,5 +1,6 @@
 // server.js（B案：クロス時intervalを保存してメールに表示・全文）
 // + BB表示名を upper/lower/middle から ±σ 表記に変更
+// + ✅ 追加：送信メール本文の一番下に【サイト】URLを追記
 
 const nodemailer = require("nodemailer");
 const express = require("express");
@@ -14,6 +15,20 @@ const { BollingerBands, EMA } = require("technicalindicators");
 
 let transporter;
 let gmailUserForFrom = null;
+
+// ✅ 追加：サイトURL（環境変数があればそれを優先）
+const SITE_URL = process.env.SITE_URL || "http://13.192.112.191:3000/";
+
+// ✅ 追加：メール末尾にサイト情報を付ける（text/html両対応）
+function appendSiteBlockToMail(text, html) {
+  const siteText = `\n\n【サイト】\n${SITE_URL}\n`;
+  const siteHtml = `<hr><p><strong>【サイト】</strong><br><a href="${SITE_URL}">${SITE_URL}</a></p>`;
+
+  return {
+    text: (text || "") + siteText,
+    html: (html || "") + siteHtml,
+  };
+}
 
 // ===== 表示名変換（DBキーは維持して、表示だけ変える） =====
 function getIndicatorDisplayName(indicatorName) {
@@ -601,12 +616,15 @@ app.post("/api/send-emails", async (req, res) => {
       return res.status(404).json({ message: "No emails found to send." });
     }
 
-    const mailOptions = {
-      from: gmailUserForFrom || process.env.GMAIL_USER,
+    let mailOptions = {
+      from: `"Parabolic" <${gmailUserForFrom || process.env.GMAIL_USER}>`,
       subject: "条件達成",
       text: "おめでとうございます。条件達成です。",
       html: "<p>おめでとうございます。条件達成です。</p>",
     };
+
+    // ✅ 追加：サイト追記
+    mailOptions = { ...mailOptions, ...appendSiteBlockToMail(mailOptions.text, mailOptions.html) };
 
     for (const email of emails) {
       await transporter.sendMail({ ...mailOptions, to: email });
@@ -803,7 +821,7 @@ async function sendThresholdEmail(user, indicatorName, crossedPrice, currentPric
   const indicatorLabel = getIndicatorDisplayName(indicatorName);
 
   const subject = `【Parabolic】【${intervalLabel}】ドル円価格アラート: ${indicatorLabel} のしきい値達成`;
-  const text = `
+  const baseText = `
 こんにちは、${user.username}さん
 
 設定された価格アラートの条件が達成されましたのでお知らせします。
@@ -825,7 +843,8 @@ async function sendThresholdEmail(user, indicatorName, crossedPrice, currentPric
 
 Parabolic Chart
 `;
-  const html = `
+
+  const baseHtml = `
     <p>こんにちは、${user.username}さん</p>
     <p>設定された価格アラートの条件が達成されましたのでお知らせします。</p>
     <hr>
@@ -845,7 +864,17 @@ Parabolic Chart
     <p>Parabolic Chart</p>
   `;
 
-  const mailOptions = { from: `"Parabolic" <${gmailUserForFrom || process.env.GMAIL_USER}>`, to: user.email, subject, text, html };
+  // ✅ 追加：末尾にサイトを付ける
+  const { text, html } = appendSiteBlockToMail(baseText, baseHtml);
+
+  const mailOptions = {
+    from: `"Parabolic" <${gmailUserForFrom || process.env.GMAIL_USER}>`,
+    to: user.email,
+    subject,
+    text,
+    html,
+  };
+
   try {
     await transporter.sendMail(mailOptions);
     console.log(`Threshold alert email sent to ${user.email} for ${indicatorName}.`);
