@@ -10655,10 +10655,89 @@
   var currentUserEmail = null;
   var latestCrossPrices = {};
   var latestEmaCrossPrices = {};
-  var sendConditionThreshold = 0.5;
   var usdJpyCurrentPrice = null;
   var currentXValue = 0;
-  var formatValue = (value2) => value2.toFixed(3);
+  var socket = null;
+  var formatValue = (value2) => Number(value2).toFixed(3);
+  var PRICE_FORMAT_3DP = { type: "price", precision: 3, minMove: 1e-3 };
+  var lsKeySuffix = "guest";
+  var LS_KEY_BB_CROSS = () => `parabolic_bb_cross_prices_v1_${lsKeySuffix}`;
+  var LS_KEY_EMA_CROSS = () => `parabolic_ema_cross_prices_v1_${lsKeySuffix}`;
+  function safeParseJson(str) {
+    try {
+      return JSON.parse(str);
+    } catch {
+      return null;
+    }
+  }
+  function loadCrossHistoryFromLocalStorage() {
+    try {
+      const bb = safeParseJson(localStorage.getItem(LS_KEY_BB_CROSS()));
+      const ema2 = safeParseJson(localStorage.getItem(LS_KEY_EMA_CROSS()));
+      if (bb && typeof bb === "object")
+        latestCrossPrices = bb;
+      if (ema2 && typeof ema2 === "object")
+        latestEmaCrossPrices = ema2;
+    } catch (e2) {
+      console.warn("Failed to load cross history from localStorage:", e2);
+    }
+  }
+  function saveCrossHistoryToLocalStorage() {
+    try {
+      localStorage.setItem(LS_KEY_BB_CROSS(), JSON.stringify(latestCrossPrices || {}));
+      localStorage.setItem(LS_KEY_EMA_CROSS(), JSON.stringify(latestEmaCrossPrices || {}));
+    } catch (e2) {
+      console.warn("Failed to save cross history to localStorage:", e2);
+    }
+  }
+  function clearCrossHistoryLocalStorage() {
+    try {
+      localStorage.removeItem(LS_KEY_BB_CROSS());
+      localStorage.removeItem(LS_KEY_EMA_CROSS());
+    } catch (e2) {
+      console.warn("Failed to clear cross history localStorage:", e2);
+    }
+  }
+  function applyCrossHistoryFromServer(crossHistory) {
+    if (!crossHistory || typeof crossHistory !== "object")
+      return;
+    if (!latestCrossPrices || typeof latestCrossPrices !== "object")
+      latestCrossPrices = {};
+    if (!latestEmaCrossPrices || typeof latestEmaCrossPrices !== "object")
+      latestEmaCrossPrices = {};
+    for (const [name, ev] of Object.entries(crossHistory)) {
+      if (!ev || typeof ev !== "object") {
+        if (String(name).startsWith("ema"))
+          latestEmaCrossPrices[name] = null;
+        else
+          latestCrossPrices[name] = null;
+        continue;
+      }
+      const p2 = ev.price;
+      if (typeof p2 !== "number" || Number.isNaN(p2))
+        continue;
+      if (String(name).startsWith("ema"))
+        latestEmaCrossPrices[name] = p2;
+      else
+        latestCrossPrices[name] = p2;
+    }
+    saveCrossHistoryToLocalStorage();
+  }
+  async function clearCrossHistoryOnServer(indicatorNames) {
+    if (!currentUserEmail)
+      return;
+    if (!Array.isArray(indicatorNames) || indicatorNames.length === 0)
+      return;
+    try {
+      await fetch("/api/user/cross_history/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ indicatorNames })
+      });
+    } catch (e2) {
+      console.warn("Failed to clear cross history on server:", e2);
+    }
+  }
   function aggregateCandleData(data, targetInterval) {
     if (!data || data.length === 0)
       return [];
@@ -10698,6 +10777,15 @@
     }
     return aggregatedData;
   }
+  function resizeChartObject(chartObj) {
+    if (!chartObj || !chartObj.chart || !chartObj.container)
+      return;
+    const w2 = chartObj.container.clientWidth;
+    const h2 = chartObj.container.clientHeight;
+    if (!w2 || !h2)
+      return;
+    chartObj.chart.resize(w2, h2);
+  }
   function updateBbValues(element, bb1, bb2) {
     if (!element || !bb1 || !bb2 || bb1.length === 0 || bb2.length === 0) {
       if (element)
@@ -10707,12 +10795,12 @@
     const latestBb1 = bb1[bb1.length - 1];
     const latestBb2 = bb2[bb2.length - 1];
     element.innerHTML = `
-          <div class="indicator-item"><span>+2\u03C3</span><span>${formatValue(latestBb2.upper)}</span></div>
-          <div class="indicator-item"><span>+1\u03C3</span><span>${formatValue(latestBb1.upper)}</span></div>
-          <div class="indicator-item"><span>0\u03C3</span><span>${formatValue(latestBb1.middle)}</span></div>
-          <div class="indicator-item"><span>-1\u03C3</span><span>${formatValue(latestBb1.lower)}</span></div>
-          <div class="indicator-item"><span>-2\u03C3</span><span>${formatValue(latestBb2.lower)}</span></div>
-      `;
+    <div class="indicator-item"><span>+2\u03C3</span><span>${formatValue(latestBb2.upper)}</span></div>
+    <div class="indicator-item"><span>+1\u03C3</span><span>${formatValue(latestBb1.upper)}</span></div>
+    <div class="indicator-item"><span>0\u03C3</span><span>${formatValue(latestBb1.middle)}</span></div>
+    <div class="indicator-item"><span>-1\u03C3</span><span>${formatValue(latestBb1.lower)}</span></div>
+    <div class="indicator-item"><span>-2\u03C3</span><span>${formatValue(latestBb2.lower)}</span></div>
+  `;
   }
   function updateEmaValues(element, emaDataArray, emaPeriods) {
     if (!element || !emaDataArray || emaDataArray.some((arr) => arr.length === 0)) {
@@ -10722,10 +10810,10 @@
     }
     const latestEmaValues = emaDataArray.map((emaData) => emaData[emaData.length - 1].value);
     element.innerHTML = `
-          <div class="indicator-item"><span>EMA(${emaPeriods[0].period})</span><span>${formatValue(latestEmaValues[0])}</span></div>
-          <div class="indicator-item"><span>EMA(${emaPeriods[1].period})</span><span>${formatValue(latestEmaValues[1])}</span></div>
-          <div class="indicator-item"><span>EMA(${emaPeriods[2].period})</span><span>${formatValue(latestEmaValues[2])}</span></div>
-      `;
+    <div class="indicator-item"><span>EMA(${emaPeriods[0].period})</span><span>${formatValue(latestEmaValues[0])}</span></div>
+    <div class="indicator-item"><span>EMA(${emaPeriods[1].period})</span><span>${formatValue(latestEmaValues[1])}</span></div>
+    <div class="indicator-item"><span>EMA(${emaPeriods[2].period})</span><span>${formatValue(latestEmaValues[2])}</span></div>
+  `;
   }
   function updateCurrentPriceValue(element, data) {
     if (!element || !data || data.length === 0) {
@@ -10737,103 +10825,142 @@
     const currentPrice = latestData.close;
     const previousPrice = data.length > 1 ? data[data.length - 2].close : currentPrice;
     const change = currentPrice - previousPrice;
-    const changePercent = change / previousPrice * 100;
+    const changePercent = previousPrice ? change / previousPrice * 100 : 0;
     const colorClass = change >= 0 ? "price-up" : "price-down";
     element.innerHTML = `
-        <span class="price-large ${colorClass}">${formatValue(currentPrice)}</span>
-        <span class="${colorClass}">${change >= 0 ? "+" : ""}${change.toFixed(2)}</span>
-        <span class="${colorClass}">(${change >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)</span>
-    `;
+    <span class="price-large ${colorClass}">${formatValue(currentPrice)}</span>
+    <span class="${colorClass}">${change >= 0 ? "+" : ""}${change.toFixed(2)}</span>
+    <span class="${colorClass}">(${change >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)</span>
+  `;
   }
   function updateCrossHistoryDisplay(element, crossPrices) {
-    let content = '<div class="indicator-group-title">BB\u30AF\u30ED\u30B9\u5C65\u6B74</div>';
+    if (!element)
+      return;
+    element.style.boxSizing = "border-box";
+    element.style.minHeight = "72px";
     const bands = ["upper2", "upper1", "middle", "lower1", "lower2"];
     const bandLabels = {
-      "upper2": "+2\u03C3",
-      "upper1": "+1\u03C3",
-      "middle": "0\u03C3",
-      "lower1": "-1\u03C3",
-      "lower2": "-2\u03C3"
+      upper2: "+2\u03C3",
+      upper1: "+1\u03C3",
+      middle: "0\u03C3",
+      lower1: "-1\u03C3",
+      lower2: "-2\u03C3"
     };
-    if (Object.keys(crossPrices).length === 0) {
-      content += '<div class="indicator-item"><span>\u30AF\u30ED\u30B9\u5F85\u6A5F\u4E2D...</span></div>';
-    } else {
-      content += '<div class="cross-item-container">';
-      for (const band of bands) {
-        const price = crossPrices[band] ? formatValue(crossPrices[band]) : "---";
-        content += `
-                <div class="indicator-item">
-                    <span>${bandLabels[band]}</span>
-                    <span>${price}</span>
-                </div>
-            `;
-      }
-      content += "</div>";
+    const hasAny = Object.values(crossPrices || {}).some((v2) => typeof v2 === "number" && !Number.isNaN(v2));
+    let content = `
+    <div class="indicator-group-title" style="margin-bottom:6px;font-weight:600;">
+      BB\u30AF\u30ED\u30B9\u5C65\u6B74
+    </div>
+  `;
+    if (!hasAny) {
+      content += `<div class="indicator-item"><span>\u30AF\u30ED\u30B9\u5F85\u6A5F\u4E2D...</span></div>`;
+      element.innerHTML = content;
+      return;
     }
+    content += `
+    <div class="cross-item-container"
+         style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;">
+  `;
+    for (const band of bands) {
+      const v2 = crossPrices?.[band];
+      const price = typeof v2 === "number" && !Number.isNaN(v2) ? formatValue(v2) : "---";
+      content += `
+      <div class="indicator-item"
+           style="display:flex;justify-content:space-between;gap:8px;white-space:nowrap;overflow:hidden;">
+        <span style="opacity:0.85;">${bandLabels[band]}</span>
+        <span style="font-variant-numeric:tabular-nums;">${price}</span>
+      </div>
+    `;
+    }
+    content += `</div>`;
     element.innerHTML = content;
   }
   function updateEmaCrossHistoryDisplay(element, crossPrices) {
-    let content = '<div class="indicator-group-title">EMA\u30AF\u30ED\u30B9\u5C65\u6B74</div>';
+    if (!element)
+      return;
+    element.style.boxSizing = "border-box";
+    element.style.minHeight = "72px";
     const emas = ["ema10", "ema25", "ema50"];
     const emaLabels = {
-      "ema10": "EMA(10)",
-      "ema25": "EMA(25)",
-      "ema50": "EMA(50)"
+      ema10: "EMA(10)",
+      ema25: "EMA(25)",
+      ema50: "EMA(50)"
     };
-    if (Object.keys(crossPrices).length === 0) {
-      content += '<div class="indicator-item"><span>\u30AF\u30ED\u30B9\u5F85\u6A5F\u4E2D...</span></div>';
-    } else {
-      content += '<div class="cross-item-container">';
-      for (const ema2 of emas) {
-        const price = crossPrices[ema2] ? formatValue(crossPrices[ema2]) : "---";
-        content += `
-                <div class="indicator-item">
-                    <span>${emaLabels[ema2]}</span>
-                    <span>${price}</span>
-                </div>
-            `;
-      }
-      content += "</div>";
+    const hasAny = Object.values(crossPrices || {}).some((v2) => typeof v2 === "number" && !Number.isNaN(v2));
+    let content = `
+    <div class="indicator-group-title" style="margin-bottom:6px;font-weight:600;">
+      EMA\u30AF\u30ED\u30B9\u5C65\u6B74
+    </div>
+  `;
+    if (!hasAny) {
+      content += `<div class="indicator-item"><span>\u30AF\u30ED\u30B9\u5F85\u6A5F\u4E2D...</span></div>`;
+      element.innerHTML = content;
+      return;
     }
+    content += `
+    <div class="cross-item-container"
+         style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;">
+  `;
+    for (const ema2 of emas) {
+      const v2 = crossPrices?.[ema2];
+      const price = typeof v2 === "number" && !Number.isNaN(v2) ? formatValue(v2) : "---";
+      content += `
+      <div class="indicator-item"
+           style="display:flex;justify-content:space-between;gap:8px;white-space:nowrap;overflow:hidden;">
+        <span style="opacity:0.85;">${emaLabels[ema2]}</span>
+        <span style="font-variant-numeric:tabular-nums;">${price}</span>
+      </div>
+    `;
+    }
+    content += `</div>`;
     element.innerHTML = content;
   }
   function checkAndResetCrossPrices() {
-    if (usdJpyCurrentPrice === null)
+    if (usdJpyCurrentPrice === null || currentXValue <= 0)
       return;
     let updatedBb = false;
+    const clearedIndicators = [];
     const bbBands = ["upper2", "upper1", "middle", "lower1", "lower2"];
     for (const band of bbBands) {
       if (latestCrossPrices[band] !== null && latestCrossPrices[band] !== void 0) {
-        if (Math.abs(usdJpyCurrentPrice - latestCrossPrices[band]) >= sendConditionThreshold) {
-          console.log(`Resetting ${band} BB cross price. Current: ${usdJpyCurrentPrice}, Cross: ${latestCrossPrices[band]}, Threshold: ${sendConditionThreshold}`);
+        if (Math.abs(usdJpyCurrentPrice - latestCrossPrices[band]) >= currentXValue) {
           latestCrossPrices[band] = null;
           updatedBb = true;
+          clearedIndicators.push(band);
         }
       }
     }
     if (updatedBb) {
-      const usdJpyChartObj = chartObjects.find((obj) => obj.ticker === "USDJPY=X");
-      if (usdJpyChartObj && usdJpyChartObj.crossHistoryElement) {
+      const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === "USDJPY=X");
+      if (usdJpyChartObj?.crossHistoryElement) {
         updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
+        requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
       }
+      saveCrossHistoryToLocalStorage();
     }
     let updatedEma = false;
+    const clearedEmaIndicators = [];
     const emaBands = ["ema10", "ema25", "ema50"];
     for (const ema2 of emaBands) {
       if (latestEmaCrossPrices[ema2] !== null && latestEmaCrossPrices[ema2] !== void 0) {
-        if (Math.abs(usdJpyCurrentPrice - latestEmaCrossPrices[ema2]) >= sendConditionThreshold) {
-          console.log(`Resetting ${ema2} EMA cross price. Current: ${usdJpyCurrentPrice}, Cross: ${latestEmaCrossPrices[ema2]}, Threshold: ${sendConditionThreshold}`);
+        if (Math.abs(usdJpyCurrentPrice - latestEmaCrossPrices[ema2]) >= currentXValue) {
           latestEmaCrossPrices[ema2] = null;
           updatedEma = true;
+          clearedEmaIndicators.push(ema2);
         }
       }
     }
     if (updatedEma) {
-      const usdJpyChartObj = chartObjects.find((obj) => obj.ticker === "USDJPY=X");
-      if (usdJpyChartObj && usdJpyChartObj.emaCrossHistoryElement) {
+      const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === "USDJPY=X");
+      if (usdJpyChartObj?.emaCrossHistoryElement) {
         updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
+        requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
       }
+      saveCrossHistoryToLocalStorage();
     }
+    const allCleared = [...clearedIndicators, ...clearedEmaIndicators];
+    if (allCleared.length > 0)
+      clearCrossHistoryOnServer(allCleared);
   }
   async function refreshChartData() {
     statusMessage.textContent = `\u66F4\u65B0\u4E2D: ${currentDataType === "stock" ? currentTickers.join(", ") : "USD/JPY"} (${currentInterval}) - \u30C7\u30FC\u30BF\u53D6\u5F97\u4E2D...`;
@@ -10848,21 +10975,18 @@
           data = await fetchUsdJpyData(chartObj.interval);
         }
         updateCurrentPriceValue(chartObj.currentPriceValuesElement, data);
-        if (!data || data.length < 20) {
-          console.warn(`Not enough data to update indicators for ${chartObj.ticker}.`);
+        if (!data || data.length < 20)
           continue;
-        }
         if (currentInterval === "4h" || currentInterval === "8h") {
           data = aggregateCandleData(data, currentInterval);
         }
-        if (!data || data.length < 20) {
-          console.warn(`Not enough aggregated data to update indicators for ${chartObj.ticker}.`);
+        if (!data || data.length < 20)
           continue;
-        }
         const closePrices = data.map((d2) => d2.close);
         const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
+        const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
         const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
-        const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
+        const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
         const bb1 = BollingerBands.calculate(bbInput1);
         const bb2 = BollingerBands.calculate(bbInput2);
         updateBbValues(chartObj.bbValuesElement, bb1, bb2);
@@ -10895,6 +11019,11 @@
             emaSeries.setData(emaDataArray[index]);
           });
         }
+        const sma1Data = data.map((d2) => ({ time: d2.time, value: d2.close }));
+        if (chartObj.sma1Series) {
+          chartObj.sma1Series.setData(sma1Data);
+        }
+        resizeChartObject(chartObj);
       } catch (error) {
         console.error(`Failed to refresh data for ${chartObj.ticker}:`, error);
         statusMessage.textContent = `\u30A8\u30E9\u30FC: ${chartObj.ticker} \u306E\u30C7\u30FC\u30BF\u66F4\u65B0\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002`;
@@ -10903,6 +11032,7 @@
     statusMessage.textContent = `\u8868\u793A\u4E2D: ${currentDataType === "stock" ? currentTickers.join(", ") : "USD/JPY"} (${currentInterval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
   }
   var stockIntervalOptions = [
+    { value: "1m", text: "1\u5206" },
     { value: "5m", text: "5\u5206" },
     { value: "15m", text: "15\u5206" },
     { value: "30m", text: "30\u5206" },
@@ -10913,6 +11043,7 @@
     { value: "1wk", text: "1\u9031\u9593" }
   ];
   var usdJpyIntervalOptions = [
+    { value: "1m", text: "1\u5206" },
     { value: "5m", text: "5\u5206" },
     { value: "15m", text: "15\u5206" },
     { value: "30m", text: "30\u5206" },
@@ -10972,11 +11103,7 @@
     return chart;
   }
   function updateTickerInputVisibility() {
-    if (currentDataType === "usd_jpy") {
-      tickersInputGroup.style.display = "none";
-    } else {
-      tickersInputGroup.style.display = "flex";
-    }
+    tickersInputGroup.style.display = currentDataType === "usd_jpy" ? "none" : "flex";
   }
   function toggleBollingerBandsVisibility() {
     areBollingerBandsVisible = !areBollingerBandsVisible;
@@ -11025,23 +11152,21 @@
     const wrapper = document.createElement("div");
     wrapper.className = "chart-wrapper";
     wrapper.innerHTML = `
-        <h2 class="chart-title">${ticker}</h2>
-        <div class="chart-container" id="ohlc-${sanitizedTicker}"></div>
-        <div class="current-price-values" id="current-price-${sanitizedTicker}"></div>
-        <div class="bb-values" id="bb-values-${sanitizedTicker}"></div>
-        <div class="ema-values" id="ema-values-${sanitizedTicker}"></div>
-        <div class="cross-history" id="cross-history-${sanitizedTicker}"></div>
-    `;
+    <h2 class="chart-title">${ticker}</h2>
+    <div class="chart-container" id="ohlc-${sanitizedTicker}"></div>
+    <div class="current-price-values" id="current-price-${sanitizedTicker}"></div>
+    <div class="bb-values" id="bb-values-${sanitizedTicker}"></div>
+    <div class="ema-values" id="ema-values-${sanitizedTicker}"></div>
+    <div class="cross-history" id="cross-history-${sanitizedTicker}"></div>
+  `;
     chartsContainer.appendChild(wrapper);
     let data;
     try {
       data = await fetchStockData(ticker, interval);
-      if (interval === "4h" || interval === "8h") {
+      if (interval === "4h" || interval === "8h")
         data = aggregateCandleData(data, interval);
-      }
-      if (!data || data.length < 20) {
+      if (!data || data.length < 20)
         throw new Error("Not enough data to calculate indicators.");
-      }
     } catch (error) {
       wrapper.querySelector(`#ohlc-${sanitizedTicker}`).innerText = `Error loading data for ${ticker}: ${error.message}`;
       return null;
@@ -11050,8 +11175,9 @@
     updateCurrentPriceValue(currentPriceValuesElement, data);
     const closePrices = data.map((d2) => d2.close);
     const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
+    const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
     const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
-    const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
+    const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
     const bb1 = BollingerBands.calculate(bbInput1);
     const bb2 = BollingerBands.calculate(bbInput2);
     const bbValuesElement = wrapper.querySelector(`#bb-values-${sanitizedTicker}`);
@@ -11076,11 +11202,56 @@
     const upperBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
     const lowerBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
     const ohlcChart = createChart(wrapper.querySelector(`#ohlc-${sanitizedTicker}`));
-    const middleBandSeries = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB 0\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const upperBand1Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB +1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const lowerBand1Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB -1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const upperBand2Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB +2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-    const lowerBand2Series = ohlcChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB -2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+    const middleBandSeries = ohlcChart.addLineSeries({
+      color: "purple",
+      lineWidth: 2,
+      title: "BB 0\u03C3",
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: areBollingerBandsVisible,
+      priceFormat: PRICE_FORMAT_3DP
+    });
+    const upperBand1Series = ohlcChart.addLineSeries({
+      color: "purple",
+      lineWidth: 2,
+      title: "BB +1\u03C3",
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: areBollingerBandsVisible,
+      priceFormat: PRICE_FORMAT_3DP
+    });
+    const lowerBand1Series = ohlcChart.addLineSeries({
+      color: "purple",
+      lineWidth: 2,
+      title: "BB -1\u03C3",
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: areBollingerBandsVisible,
+      priceFormat: PRICE_FORMAT_3DP
+    });
+    const upperBand2Series = ohlcChart.addLineSeries({
+      color: "purple",
+      lineWidth: 2,
+      title: "BB +2\u03C3",
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: areBollingerBandsVisible,
+      priceFormat: PRICE_FORMAT_3DP
+    });
+    const lowerBand2Series = ohlcChart.addLineSeries({
+      color: "purple",
+      lineWidth: 2,
+      title: "BB -2\u03C3",
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: areBollingerBandsVisible,
+      priceFormat: PRICE_FORMAT_3DP
+    });
     middleBandSeries.setData(middleBandData);
     upperBand1Series.setData(upperBand1Data);
     lowerBand1Series.setData(lowerBand1Data);
@@ -11094,17 +11265,31 @@
         crosshairMarkerVisible: false,
         priceLineVisible: false,
         lastValueVisible: false,
-        visible: areEmaVisible
+        visible: areEmaVisible,
+        priceFormat: PRICE_FORMAT_3DP
       });
       emaSeries.setData(emaDataArray[index]);
       return emaSeries;
     });
+    const sma1Data = data.map((d2) => ({ time: d2.time, value: d2.close }));
+    const sma1Series = ohlcChart.addLineSeries({
+      color: "cyan",
+      lineWidth: 1,
+      title: "SMA(1)",
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      visible: true,
+      priceFormat: PRICE_FORMAT_3DP
+    });
+    sma1Series.setData(sma1Data);
     const candleSeries = ohlcChart.addCandlestickSeries({
       upColor: "#ff4c4c",
       downColor: "#4c6aff",
       borderVisible: false,
       wickUpColor: "#ff4c4c",
-      wickDownColor: "#4c6aff"
+      wickDownColor: "#4c6aff",
+      priceFormat: PRICE_FORMAT_3DP
     });
     candleSeries.setData(data);
     return {
@@ -11113,7 +11298,6 @@
       currentPriceValuesElement,
       bbValuesElement,
       emaValuesElement,
-      // Add a placeholder for crossHistoryElement for consistency, even if not used for stocks
       crossHistoryElement: wrapper.querySelector(`#cross-history-${sanitizedTicker}`),
       candleSeries,
       middleBandSeries,
@@ -11122,6 +11306,7 @@
       upperBand2Series,
       lowerBand2Series,
       emaSeriesArray,
+      sma1Series,
       ticker,
       interval
     };
@@ -11138,22 +11323,14 @@
       const wrapper = document.createElement("div");
       wrapper.className = "chart-wrapper";
       wrapper.innerHTML = `
-            <h2 class="chart-title">USD/JPY</h2>
-            <div class="chart-container" id="usd-jpy-chart"></div>
-            <div class="current-price-values" id="current-price-usdjpy"></div>
-            <div class="bb-values" id="bb-values-usdjpy"></div>
-            <div class="ema-values" id="ema-values-usdjpy"></div>
-            <div class="cross-history" id="cross-history-usdjpy"></div>
-            <div class="cross-history" id="ema-cross-history-usdjpy"></div>
-            <div class="cross-reset-settings">
-                <label for="cross-reset-threshold-input" class="form-label">\u9001\u4FE1\u6761\u4EF6 (\xB1\u5186)</label>
-                <span id="current-send-condition-threshold-display" class="value-display">\u73FE\u5728\u306E\u9001\u4FE1\u6761\u4EF6: --</span>
-                <div class="input-group">
-                    <input type="number" id="cross-reset-threshold-input" class="form-input" step="0.001" min="0.01">
-                    <button id="apply-cross-reset-button" class="btn btn-secondary">\u9069\u7528</button>
-                </div>
-            </div>
-        `;
+      <h2 class="chart-title">USD/JPY</h2>
+      <div class="chart-container" id="usd-jpy-chart"></div>
+      <div class="current-price-values" id="current-price-usdjpy"></div>
+      <div class="bb-values" id="bb-values-usdjpy"></div>
+      <div class="ema-values" id="ema-values-usdjpy"></div>
+      <div class="cross-history" id="cross-history-usdjpy"></div>
+      <div class="cross-history" id="ema-cross-history-usdjpy"></div>
+    `;
       chartsContainer.appendChild(wrapper);
       let data;
       let errorMessage = "";
@@ -11187,8 +11364,9 @@
       }
       const closePrices = data.map((d2) => d2.close);
       const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
+      const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
       const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
-      const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: 2 };
+      const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
       const bb1 = BollingerBands.calculate(bbInput1);
       const bb2 = BollingerBands.calculate(bbInput2);
       const bbValuesElement = wrapper.querySelector("#bb-values-usdjpy");
@@ -11217,11 +11395,56 @@
       const upperBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.upper }));
       const lowerBand2Data = bb2.map((d2, i) => ({ time: data[i + dataOffset].time, value: d2.lower }));
       const usdJpyChart = createChart(wrapper.querySelector(`#usd-jpy-chart`));
-      const middleBandSeries = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB 0\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-      const upperBand1Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB +1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-      const lowerBand1Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB -1\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-      const upperBand2Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB +2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
-      const lowerBand2Series = usdJpyChart.addLineSeries({ color: "purple", lineWidth: 2, title: "BB -2\u03C3", crosshairMarkerVisible: false, priceLineVisible: false, lastValueVisible: false, visible: areBollingerBandsVisible });
+      const middleBandSeries = usdJpyChart.addLineSeries({
+        color: "purple",
+        lineWidth: 2,
+        title: "BB 0\u03C3",
+        crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        visible: areBollingerBandsVisible,
+        priceFormat: PRICE_FORMAT_3DP
+      });
+      const upperBand1Series = usdJpyChart.addLineSeries({
+        color: "purple",
+        lineWidth: 2,
+        title: "BB +1\u03C3",
+        crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        visible: areBollingerBandsVisible,
+        priceFormat: PRICE_FORMAT_3DP
+      });
+      const lowerBand1Series = usdJpyChart.addLineSeries({
+        color: "purple",
+        lineWidth: 2,
+        title: "BB -1\u03C3",
+        crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        visible: areBollingerBandsVisible,
+        priceFormat: PRICE_FORMAT_3DP
+      });
+      const upperBand2Series = usdJpyChart.addLineSeries({
+        color: "purple",
+        lineWidth: 2,
+        title: "BB +2\u03C3",
+        crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        visible: areBollingerBandsVisible,
+        priceFormat: PRICE_FORMAT_3DP
+      });
+      const lowerBand2Series = usdJpyChart.addLineSeries({
+        color: "purple",
+        lineWidth: 2,
+        title: "BB -2\u03C3",
+        crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        visible: areBollingerBandsVisible,
+        priceFormat: PRICE_FORMAT_3DP
+      });
       middleBandSeries.setData(middleBandData);
       upperBand1Series.setData(upperBand1Data);
       lowerBand1Series.setData(lowerBand1Data);
@@ -11235,45 +11458,34 @@
           crosshairMarkerVisible: false,
           priceLineVisible: false,
           lastValueVisible: false,
-          visible: areEmaVisible
+          visible: areEmaVisible,
+          priceFormat: PRICE_FORMAT_3DP
         });
         emaSeries.setData(emaDataArray[index]);
         return emaSeries;
       });
+      const sma1Data = data.map((d2) => ({ time: d2.time, value: d2.close }));
+      const sma1Series = usdJpyChart.addLineSeries({
+        color: "cyan",
+        lineWidth: 1,
+        title: "SMA(1)",
+        crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        visible: true,
+        priceFormat: PRICE_FORMAT_3DP
+      });
+      sma1Series.setData(sma1Data);
       const candleSeries = usdJpyChart.addCandlestickSeries({
         upColor: "#ff4c4c",
         downColor: "#4c6aff",
         borderVisible: false,
         wickUpColor: "#ff4c4c",
-        wickDownColor: "#4c6aff"
+        wickDownColor: "#4c6aff",
+        priceFormat: PRICE_FORMAT_3DP
       });
       candleSeries.setData(data);
       usdJpyChart.timeScale().fitContent();
-      const currentSendConditionThresholdDisplay = wrapper.querySelector("#current-send-condition-threshold-display");
-      if (currentSendConditionThresholdDisplay) {
-        currentSendConditionThresholdDisplay.textContent = `\u73FE\u5728\u306E\u9001\u4FE1\u6761\u4EF6: ${sendConditionThreshold.toFixed(3)}`;
-      }
-      const crossResetThresholdInput = wrapper.querySelector("#cross-reset-threshold-input");
-      const applyCrossResetButton = wrapper.querySelector("#apply-cross-reset-button");
-      if (crossResetThresholdInput) {
-        crossResetThresholdInput.value = sendConditionThreshold.toFixed(3);
-      }
-      if (applyCrossResetButton) {
-        applyCrossResetButton.addEventListener("click", async () => {
-          if (crossResetThresholdInput) {
-            sendConditionThreshold = parseFloat(crossResetThresholdInput.value);
-            console.log("BB Reset Threshold updated to:", sendConditionThreshold);
-            checkAndResetCrossPrices();
-            saveUserSettings();
-            xValueInput.value = sendConditionThreshold;
-            await saveUserXValue();
-            if (currentSendConditionThresholdDisplay) {
-              currentSendConditionThresholdDisplay.textContent = `\u73FE\u5728\u306E\u9001\u4FE1\u6761\u4EF6: ${sendConditionThreshold.toFixed(3)}`;
-            }
-            crossResetThresholdInput.value = sendConditionThreshold.toFixed(3);
-          }
-        });
-      }
       return {
         chart: usdJpyChart,
         container: wrapper.querySelector(`#usd-jpy-chart`),
@@ -11282,7 +11494,6 @@
         emaValuesElement,
         crossHistoryElement,
         emaCrossHistoryElement,
-        // Add emaCrossHistoryElement here
         candleSeries,
         middleBandSeries,
         upperBand1Series,
@@ -11290,6 +11501,7 @@
         upperBand2Series,
         lowerBand2Series,
         emaSeriesArray,
+        sma1Series,
         ticker: "USDJPY=X",
         interval: actualInterval
       };
@@ -11297,13 +11509,11 @@
     return null;
   }
   async function start(dataType) {
-    console.log("start function called with dataType:", dataType);
-    if (updateIntervalId) {
+    if (updateIntervalId)
       clearInterval(updateIntervalId);
-    }
+    currentInterval = intervalSelect.value;
     chartsContainer.innerHTML = "";
     chartObjects = [];
-    latestCrossPrices = {};
     usdJpyCurrentPrice = null;
     statusMessage.textContent = "\u30C1\u30E3\u30FC\u30C8\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059...";
     currentDataType = dataType;
@@ -11312,26 +11522,20 @@
       currentInterval = intervalSelect.value;
       const formattedTickers = currentTickers.map((c2) => c2.endsWith(".T") ? c2 : `${c2}.T`);
       await renderChartsForStocks(formattedTickers, currentInterval);
-      statusMessage.textContent = `\u8868\u793A\u4E2D: ${formattedTickers.join(", ")} (${currentInterval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
-      updateIntervalId = setInterval(refreshChartData, 60 * 1e3);
+      statusMessage.textContent = `\u8868\u793A\u4E2D: ${formattedTickers.join(", ")} (${currentInterval}) - 30\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
+      updateIntervalId = setInterval(refreshChartData, 30 * 1e3);
     } else if (dataType === "usd_jpy") {
       currentTickers = ["USDJPY=X"];
       currentInterval = intervalSelect.value;
       const usdJpyChartObj = await renderChartForUsdJpy(currentInterval);
-      if (usdJpyChartObj) {
+      if (usdJpyChartObj)
         chartObjects.push(usdJpyChartObj);
-      }
-      statusMessage.textContent = `\u8868\u793A\u4E2D: USD/JPY (${currentInterval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
-      updateIntervalId = setInterval(refreshChartData, 60 * 1e3);
+      statusMessage.textContent = `\u8868\u793A\u4E2D: USD/JPY (${currentInterval}) - 30\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
+      updateIntervalId = setInterval(refreshChartData, 30 * 1e3);
     }
   }
   window.addEventListener("resize", () => {
-    chartObjects.forEach((obj) => {
-      if (!obj)
-        return;
-      const { container, chart } = obj;
-      chart.resize(container.clientWidth, container.clientHeight);
-    });
+    chartObjects.forEach((obj) => resizeChartObject(obj));
   });
   startButton.addEventListener("click", () => {
     start(currentDataType);
@@ -11348,7 +11552,6 @@
   applyIndicatorsButton.addEventListener("click", () => {
     start(currentDataType);
     saveUserSettings();
-    sendBbSettingsToServer();
   });
   intervalSelect.addEventListener("change", () => {
     currentInterval = intervalSelect.value;
@@ -11487,9 +11690,7 @@
       bbStdDev: bbStdDevInput.value,
       ema1Period: ema1PeriodInput.value,
       ema2Period: ema2PeriodInput.value,
-      ema3Period: ema3PeriodInput.value,
-      sendConditionThreshold
-      // Add this line
+      ema3Period: ema3PeriodInput.value
     };
     try {
       const response = await fetch("/api/user/settings", {
@@ -11509,6 +11710,7 @@
       if (response.ok) {
         const settings = await response.json();
         if (Object.keys(settings).length > 0) {
+          applyCrossHistoryFromServer(settings.realTimeState?.crossHistory);
           currentDataType = settings.currentDataType || "stock";
           intervalSelect.value = settings.currentInterval || "1d";
           tickersInput.value = settings.tickersInput || "7203";
@@ -11519,11 +11721,6 @@
           ema1PeriodInput.value = settings.ema1Period || "10";
           ema2PeriodInput.value = settings.ema2Period || "25";
           ema3PeriodInput.value = settings.ema3Period || "50";
-          sendConditionThreshold = settings.sendConditionThreshold !== void 0 ? settings.sendConditionThreshold : 0.5;
-          const crossResetThresholdInput = document.getElementById("cross-reset-threshold-input");
-          if (crossResetThresholdInput) {
-            crossResetThresholdInput.value = sendConditionThreshold.toFixed(3);
-          }
           checkAndResetCrossPrices();
           if (currentDataType === "stock") {
             stockToggle.classList.add("active");
@@ -11560,7 +11757,6 @@
         xValueInput.value = currentXValue.toFixed(3);
         xValueControls.classList.remove("hidden");
       } else {
-        console.error("Failed to fetch user x_value.");
         xValueControls.classList.add("hidden");
       }
     } catch (error) {
@@ -11574,14 +11770,12 @@
       alert("\u6709\u52B9\u306A\u6570\u5024\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
       return;
     }
-    console.log("Attempting to save x_value:", newXValue);
     try {
       const response = await fetch("/api/user/x_value", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ x_value: newXValue })
       });
-      console.log("Response status from /api/user/x_value:", response.status);
       if (response.ok) {
         const data = await response.json();
         currentXValue = parseFloat(data.x_value);
@@ -11599,16 +11793,22 @@
       const response = await fetch("/api/auth/me");
       if (response.ok) {
         const data = await response.json();
+        lsKeySuffix = String(data.user.id ?? data.user.email ?? "guest");
         userInfoSpan.textContent = `\u3088\u3046\u3053\u305D\u3001${data.user.username}\u3055\u3093\uFF01`;
         currentUserEmail = data.user.email;
         userInfoSpan.classList.remove("hidden");
         loginButton.classList.add("hidden");
         registerButton.classList.add("hidden");
         logoutButton.classList.remove("hidden");
+        loadCrossHistoryFromLocalStorage();
         fetchUserXValue();
         loadUserSettings();
       } else {
         currentUserEmail = null;
+        lsKeySuffix = "guest";
+        latestCrossPrices = {};
+        latestEmaCrossPrices = {};
+        clearCrossHistoryLocalStorage();
         userInfoSpan.classList.add("hidden");
         loginButton.classList.remove("hidden");
         registerButton.classList.remove("hidden");
@@ -11618,6 +11818,10 @@
       }
     } catch (error) {
       currentUserEmail = null;
+      lsKeySuffix = "guest";
+      latestCrossPrices = {};
+      latestEmaCrossPrices = {};
+      clearCrossHistoryLocalStorage();
       console.error("Failed to check authentication status:", error);
       userInfoSpan.classList.add("hidden");
       loginButton.classList.remove("hidden");
@@ -11633,7 +11837,11 @@
       const data = await response.json();
       if (response.ok) {
         alert(data.message || "\u30ED\u30B0\u30A2\u30A6\u30C8\u3057\u307E\u3057\u305F\u3002");
+        clearCrossHistoryLocalStorage();
         currentUserEmail = null;
+        lsKeySuffix = "guest";
+        latestCrossPrices = {};
+        latestEmaCrossPrices = {};
         xValueControls.classList.add("hidden");
         await checkAuthStatus();
       } else {
@@ -11646,7 +11854,7 @@
   }
   logoutButton.addEventListener("click", handleLogout);
   saveXValueButton.addEventListener("click", saveUserXValue);
-  document.addEventListener("DOMContentLoaded", () => {
+  document.addEventListener("DOMContentLoaded", async () => {
     if (currentDataType === "stock") {
       stockToggle.classList.add("active");
       updateIntervalOptions(stockIntervalOptions, "1d");
@@ -11655,7 +11863,7 @@
       updateIntervalOptions(usdJpyIntervalOptions, "1d");
     }
     updateTickerInputVisibility();
-    checkAuthStatus();
+    await checkAuthStatus();
     socket = lookup2(`${window.location.protocol}//${window.location.hostname}:3000`);
     socket.on("connect", () => {
       console.log("Connected to WebSocket server!");
@@ -11665,9 +11873,11 @@
       notificationElement.textContent = data.message;
       notificationElement.classList.remove("hidden");
       latestCrossPrices[data.bandName] = data.price;
-      const usdJpyChartObj = chartObjects.find((obj) => obj.ticker === "USDJPY=X");
-      if (usdJpyChartObj && usdJpyChartObj.crossHistoryElement) {
+      saveCrossHistoryToLocalStorage();
+      const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === "USDJPY=X");
+      if (usdJpyChartObj?.crossHistoryElement) {
         updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
+        requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
       }
       setTimeout(() => {
         notificationElement.classList.add("hidden");
@@ -11678,9 +11888,11 @@
       notificationElement.textContent = data.message;
       notificationElement.classList.remove("hidden");
       latestEmaCrossPrices[data.emaName] = data.price;
-      const usdJpyChartObj = chartObjects.find((obj) => obj.ticker === "USDJPY=X");
-      if (usdJpyChartObj && usdJpyChartObj.emaCrossHistoryElement) {
+      saveCrossHistoryToLocalStorage();
+      const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === "USDJPY=X");
+      if (usdJpyChartObj?.emaCrossHistoryElement) {
         updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
+        requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
       }
       setTimeout(() => {
         notificationElement.classList.add("hidden");
@@ -11692,11 +11904,11 @@
     socket.on("usd_jpy_price_update", (data) => {
       usdJpyCurrentPrice = data.price;
       checkAndResetCrossPrices();
+      const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === "USDJPY=X");
+      if (usdJpyChartObj?.currentPriceValuesElement) {
+        updateCurrentPriceValue(usdJpyChartObj.currentPriceValuesElement, [{ close: data.price }]);
+      }
     });
-  });
-  applyIndicatorsButton.addEventListener("click", () => {
-    start(currentDataType);
-    saveUserSettings();
   });
 })();
 /*! Bundled license information:
