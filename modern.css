@@ -270,6 +270,25 @@ body > .app-grid-container {
     color: var(--accent-primary);
 }
 
+.btn-danger {
+    background-color: var(--error-color);
+    color: #ffffff;
+    border: 1px solid var(--error-color);
+}
+.btn-danger:hover {
+    background-color: var(--error-color-hover);
+    border-color: var(--error-color-hover);
+}
+
+.button-group-horizontal {
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+}
+.button-group-horizontal .btn {
+    flex: 1; /* allow buttons to share space */
+}
+
 .sidebar-card .btn {
     width: 100%;
 }

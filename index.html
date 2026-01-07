@@ -5,6 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Parabolic Chart</title>
     <link rel="stylesheet" href="modern.css">
+
+    <style>
+      /* ✅ ヘッダー用の小型スイッチ（既存CSSを壊さないようにprefix付け） */
+      .pc-switch { position: relative; display: inline-block; width: 42px; height: 22px; flex: 0 0 auto; }
+      .pc-switch input { opacity: 0; width: 0; height: 0; }
+      .pc-slider {
+        position: absolute; cursor: pointer; inset: 0;
+        background: rgba(255,255,255,0.28);
+        border-radius: 999px; transition: 0.2s;
+      }
+      .pc-slider:before {
+        content: ""; position: absolute; height: 18px; width: 18px; left: 2px; bottom: 2px;
+        background: #fff; border-radius: 999px; transition: 0.2s;
+      }
+      .pc-switch input:checked + .pc-slider { background: rgba(0, 200, 83, 0.75); }
+      .pc-switch input:checked + .pc-slider:before { transform: translateX(20px); }
+    </style>
 </head>
 <body>
     <div id="cross-notification" class="hidden"></div>
@@ -38,7 +55,19 @@
                             <option value="1d" selected>日足</option>
                         </select>
                     </div>
+
                     <button id="start-button" class="btn btn-primary">表示開始</button>
+
+                    <!-- ✅ 追加：ログイン時のみ表示する「メール受信」トグル（レイアウト崩れ防止でnowrap） -->
+                    <div id="email-alert-toggle-container" class="hidden"
+                         style="display:flex;align-items:center;gap:8px;margin-left:8px;white-space:nowrap;flex:0 0 auto;">
+                      <label class="pc-switch" aria-label="メール受信の切り替え">
+                        <input type="checkbox" id="email-alert-toggle" checked>
+                        <span class="pc-slider"></span>
+                      </label>
+                      <span id="email-alert-toggle-text" style="font-size:0.9rem;opacity:0.9;">メール受信: ON</span>
+                    </div>
+
                 </div>
             </div>
             <div class="header-right">
@@ -58,10 +87,13 @@
                 <h3 class="card-title">ユーザー設定</h3>
                 <div class="card-content">
                     <div class="input-group vertical">
-                        <label for="x-value-input">通知しきい値 (x)</label>
-                        <span id="current-x-value" class="value-display">現在のX値: --</span>
+                        <label for="x-value-input" id="x-value-label">通知しきい値 (<span id="x-value-interval-label">x</span>)</label>
+                        <span id="current-x-value" class="value-display">現在の値: --</span>
                         <input type="text" id="x-value-input" class="form-input" value="0">
-                        <button id="save-x-value-button" class="btn btn-secondary">保存</button>
+                        <div class="button-group-horizontal">
+                            <button id="save-x-value-button" class="btn btn-secondary">保存</button>
+                            <button id="delete-x-value-button" class="btn btn-danger">削除</button>
+                        </div>
                     </div>
                 </div>
             </div>

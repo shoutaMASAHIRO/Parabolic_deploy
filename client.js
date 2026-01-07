@@ -1,3 +1,4 @@
+// client.js
 import { createChart as createLightweightChart, LineStyle } from 'lightweight-charts';
 import { BollingerBands, SMA, EMA } from 'technicalindicators';
 import { io } from 'socket.io-client';
@@ -28,6 +29,11 @@ const emailListPanel = document.getElementById('email-list-panel');
 const emailList = document.getElementById('email-list');
 const notificationElement = document.getElementById('cross-notification');
 
+// ✅ 追加：ヘッダーの「メール受信」トグル
+const emailAlertToggleContainer = document.getElementById('email-alert-toggle-container');
+const emailAlertToggle = document.getElementById('email-alert-toggle');
+const emailAlertToggleText = document.getElementById('email-alert-toggle-text');
+
 // --- Authentication DOM Elements ---
 const userInfoSpan = document.getElementById('user-info');
 const loginButton = document.getElementById('login-button');
@@ -36,9 +42,12 @@ const logoutButton = document.getElementById('logout-button');
 
 // --- X Value DOM Elements ---
 const xValueControls = document.getElementById('x-value-controls');
+const xValueLabel = document.getElementById('x-value-label');
+const xValueIntervalLabel = document.getElementById('x-value-interval-label');
 const currentXValueSpan = document.getElementById('current-x-value');
 const xValueInput = document.getElementById('x-value-input');
 const saveXValueButton = document.getElementById('save-x-value-button');
+const deleteXValueButton = document.getElementById('delete-x-value-button');
 
 // --- Global State ---
 let chartObjects = []; // holds all chart instances and their series for updates
@@ -49,16 +58,57 @@ let currentTickers = [];
 let areBollingerBandsVisible = true;
 let areEmaVisible = true;
 let currentUserEmail = null;
-let latestCrossPrices = {};
-let latestEmaCrossPrices = {};
+
+// ✅ intervalごとに保持（独立運用）
+let latestCrossPricesByInterval = {}; // { [interval]: { upper2: {price,interval,timestamp}|null, ... } }
+let latestEmaCrossPricesByInterval = {}; // { [interval]: { ema10: {price,interval,timestamp}|null, ... } }
+
 let usdJpyCurrentPrice = null;
-let currentXValue = 0;
-let socket = null; // ===== FIX: avoid implicit global
+let currentUserXValues = {}; // Maps interval to x_value, e.g., {"1h": 0.5, "4h": 1.0}
+let socket = null;
 
 /**
  * Formats a numeric value to three decimal places.
  */
 const formatValue = (value) => Number(value).toFixed(3);
+
+// ✅ 追加：メール受信トグルの表示更新
+function updateEmailAlertToggleUI() {
+  if (!emailAlertToggle || !emailAlertToggleText) return;
+  emailAlertToggleText.textContent = emailAlertToggle.checked ? 'メール受信: ON' : 'メール受信: OFF';
+}
+
+// =========================
+// ✅ X-value helpers (FIX)
+// =========================
+// 未設定は null として扱う（0/NaN/負は無効）
+function normalizeXValue(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  if (n <= 0) return null;
+  return n;
+}
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj || {}, key);
+}
+function getXValueForInterval(interval) {
+  if (!hasOwn(currentUserXValues, interval)) return null;
+  return normalizeXValue(currentUserXValues[interval]);
+}
+// 保存時は「正の数だけ」送る（消したキーが勝手に復活しない）
+function buildCleanXValues() {
+  const cleaned = {};
+  for (const [iv, v] of Object.entries(currentUserXValues || {})) {
+    const n = normalizeXValue(v);
+    if (n != null) cleaned[iv] = n;
+  }
+  return cleaned;
+}
+
+// ✅ クリア直後に 0.001 が見えるのを避ける（HTML側の初期value対策）
+try {
+  if (xValueInput) xValueInput.value = '';
+} catch {}
 
 // ✅ 縦軸(価格軸)を小数第3位固定にするための設定
 // Lightweight Charts は series ごとの priceFormat が価格目盛り/クロスヘア表示に効きます
@@ -70,8 +120,8 @@ const PRICE_FORMAT_3DP = { type: 'price', precision: 3, minMove: 0.001 };
 // ✅ ブラウザを閉じてもクロス履歴を残す（localStorage）
 // ✅ さらにサーバ(DB: user_settings.realTimeState.crossHistory) から復元して確実にする
 let lsKeySuffix = 'guest';
-const LS_KEY_BB_CROSS = () => `parabolic_bb_cross_prices_v1_${lsKeySuffix}`;
-const LS_KEY_EMA_CROSS = () => `parabolic_ema_cross_prices_v1_${lsKeySuffix}`;
+const LS_KEY_BB_CROSS = () => `parabolic_bb_cross_prices_v2_${lsKeySuffix}`;
+const LS_KEY_EMA_CROSS = () => `parabolic_ema_cross_prices_v2_${lsKeySuffix}`;
 
 function safeParseJson(str) {
   try {
@@ -81,12 +131,97 @@ function safeParseJson(str) {
   }
 }
 
+// =========================
+// Cross event shape helpers
+// =========================
+// 旧: { upper2: 150.123 } のように number を保存していた互換も吸収する
+function normalizeCrossEvent(v) {
+  if (v == null) return null;
+  if (typeof v === 'number' && !Number.isNaN(v)) {
+    return { price: v, interval: null, timestamp: null };
+  }
+  if (typeof v === 'object') {
+    const p = v.price;
+    if (typeof p === 'number' && !Number.isNaN(p)) {
+      return {
+        price: p,
+        interval: typeof v.interval === 'string' ? v.interval : null,
+        timestamp: typeof v.timestamp === 'string' ? v.timestamp : null,
+      };
+    }
+  }
+  return null;
+}
+
+function getCrossPriceValue(v) {
+  const ev = normalizeCrossEvent(v);
+  return ev ? ev.price : null;
+}
+
+function ensureIntervalMap(obj, interval) {
+  const iv = String(interval || 'unknown');
+  if (!obj[iv] || typeof obj[iv] !== 'object') obj[iv] = {};
+  return obj[iv];
+}
+function getBbCrossMap(interval) {
+  return ensureIntervalMap(latestCrossPricesByInterval, interval);
+}
+function getEmaCrossMap(interval) {
+  return ensureIntervalMap(latestEmaCrossPricesByInterval, interval);
+}
+
+// localStorage → in-memory（v2: interval別）
+function ingestCrossHistoryObjectToByInterval(sourceObj, targetByInterval) {
+  if (!sourceObj || typeof sourceObj !== 'object') return;
+
+  const values = Object.values(sourceObj);
+
+  const looksNested =
+    values.some(
+      (v) =>
+        v &&
+        typeof v === 'object' &&
+        !normalizeCrossEvent(v) && // v自体がeventでない
+        Object.values(v).some((x) => normalizeCrossEvent(x))
+    );
+
+  const looksFlat =
+    values.some((v) => normalizeCrossEvent(v) !== null) || values.some((v) => v === null);
+
+  // nested: { "1h": { upper2: {...}, ... }, "5m": {...} }
+  if (looksNested && !looksFlat) {
+    for (const [intervalKey, map] of Object.entries(sourceObj)) {
+      if (!map || typeof map !== 'object') continue;
+      const dest = ensureIntervalMap(targetByInterval, intervalKey);
+      for (const [name, ev] of Object.entries(map)) {
+        const n = normalizeCrossEvent(ev);
+        dest[String(name)] = n ? n : ev === null ? null : dest[String(name)];
+      }
+    }
+    return;
+  }
+
+  // flat legacy: { upper2: {...}, ema10: {...}, ... }
+  const fallbackInterval = currentInterval || intervalSelect?.value || 'unknown';
+  for (const [name, ev] of Object.entries(sourceObj)) {
+    if (ev === null) {
+      ensureIntervalMap(targetByInterval, fallbackInterval)[String(name)] = null;
+      continue;
+    }
+    const n = normalizeCrossEvent(ev);
+    if (!n) continue;
+    const iv = n.interval || fallbackInterval;
+    ensureIntervalMap(targetByInterval, iv)[String(name)] = n;
+  }
+}
+
 function loadCrossHistoryFromLocalStorage() {
   try {
     const bb = safeParseJson(localStorage.getItem(LS_KEY_BB_CROSS()));
     const ema = safeParseJson(localStorage.getItem(LS_KEY_EMA_CROSS()));
-    if (bb && typeof bb === 'object') latestCrossPrices = bb;
-    if (ema && typeof ema === 'object') latestEmaCrossPrices = ema;
+
+    if (bb && typeof bb === 'object') ingestCrossHistoryObjectToByInterval(bb, latestCrossPricesByInterval);
+    if (ema && typeof ema === 'object') ingestCrossHistoryObjectToByInterval(ema, latestEmaCrossPricesByInterval);
   } catch (e) {
     console.warn('Failed to load cross history from localStorage:', e);
   }
@@ -94,8 +229,8 @@ function loadCrossHistoryFromLocalStorage() {
 
 function saveCrossHistoryToLocalStorage() {
   try {
-    localStorage.setItem(LS_KEY_BB_CROSS(), JSON.stringify(latestCrossPrices || {}));
-    localStorage.setItem(LS_KEY_EMA_CROSS(), JSON.stringify(latestEmaCrossPrices || {}));
+    localStorage.setItem(LS_KEY_BB_CROSS(), JSON.stringify(latestCrossPricesByInterval || {}));
+    localStorage.setItem(LS_KEY_EMA_CROSS(), JSON.stringify(latestEmaCrossPricesByInterval || {}));
   } catch (e) {
     console.warn('Failed to save cross history to localStorage:', e);
   }
@@ -110,46 +245,32 @@ function clearCrossHistoryLocalStorage() {
   }
 }
 
-// server(DB)に保存されている crossHistory を client 用の形に反映
+// server(DB)に保存されている crossHistory を client 用の形に反映（interval別に吸収）
 function applyCrossHistoryFromServer(crossHistory) {
   if (!crossHistory || typeof crossHistory !== 'object') return;
 
-  if (!latestCrossPrices || typeof latestCrossPrices !== 'object') latestCrossPrices = {};
-  if (!latestEmaCrossPrices || typeof latestEmaCrossPrices !== 'object') latestEmaCrossPrices = {};
+  // serverは v2で nested 想定：{ "5m": {upper2:{...}}, "1h": {...} }
+  // ただし旧データ(flat)も来る可能性があるので ingest 関数に通す
+  ingestCrossHistoryObjectToByInterval(crossHistory, latestCrossPricesByInterval); // ここはBB/EMA混在でも一旦入る
+  // ↑ ただし上はBB/EMA仕分けしないので、以下で再仕分けする（混在入力対応）
+  // いったん退避
+  const mixed = latestCrossPricesByInterval;
+  latestCrossPricesByInterval = {};
+  latestEmaCrossPricesByInterval = {};
 
-  for (const [name, ev] of Object.entries(crossHistory)) {
-    // null は「クリア済み」扱い
-    if (!ev || typeof ev !== 'object') {
-      if (String(name).startsWith('ema')) latestEmaCrossPrices[name] = null;
-      else latestCrossPrices[name] = null;
-      continue;
+  for (const [iv, map] of Object.entries(mixed || {})) {
+    if (!map || typeof map !== 'object') continue;
+    for (const [name, ev] of Object.entries(map)) {
+      const n = normalizeCrossEvent(ev);
+      if (String(name).startsWith('ema')) {
+        ensureIntervalMap(latestEmaCrossPricesByInterval, iv)[String(name)] = n ? n : ev === null ? null : null;
+      } else {
+        ensureIntervalMap(latestCrossPricesByInterval, iv)[String(name)] = n ? n : ev === null ? null : null;
+      }
     }
-
-    const p = ev.price;
-    if (typeof p !== 'number' || Number.isNaN(p)) continue;
-
-    if (String(name).startsWith('ema')) latestEmaCrossPrices[name] = p;
-    else latestCrossPrices[name] = p;
   }
 
   saveCrossHistoryToLocalStorage();
-}
-
-// clientで消したものを server(DB) も消して整合を取る
-async function clearCrossHistoryOnServer(indicatorNames) {
-  // セッションベースなので、ログイン状態じゃないなら何もしない
-  if (!currentUserEmail) return;
-  if (!Array.isArray(indicatorNames) || indicatorNames.length === 0) return;
-
-  try {
-    await fetch('/api/user/cross_history/clear', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ indicatorNames }),
-    });
-  } catch (e) {
-    console.warn('Failed to clear cross history on server:', e);
-  }
 }
 
 // --- Helper Function for Aggregating Candlestick Data ---
@@ -207,6 +328,19 @@ function resizeChartObject(chartObj) {
   const h = chartObj.container.clientHeight;
   if (!w || !h) return;
   chartObj.chart.resize(w, h);
+}
+
+function refreshUsdJpyCrossHistoryUI() {
+  const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
+  if (!usdJpyChartObj) return;
+
+  if (usdJpyChartObj.crossHistoryElement) {
+    updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, getBbCrossMap(currentInterval));
+  }
+  if (usdJpyChartObj.emaCrossHistoryElement) {
+    updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, getEmaCrossMap(currentInterval));
+  }
+  requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
 }
 
 /**
@@ -290,11 +424,11 @@ function updateCrossHistoryDisplay(element, crossPrices) {
     lower2: '-2σ',
   };
 
-  const hasAny = Object.values(crossPrices || {}).some((v) => typeof v === 'number' && !Number.isNaN(v));
+  const hasAny = Object.values(crossPrices || {}).some((v) => getCrossPriceValue(v) != null);
 
   let content = `
     <div class="indicator-group-title" style="margin-bottom:6px;font-weight:600;">
-      BBクロス履歴
+      BBクロス履歴（${currentInterval}）
     </div>
   `;
 
@@ -311,7 +445,8 @@ function updateCrossHistoryDisplay(element, crossPrices) {
 
   for (const band of bands) {
     const v = crossPrices?.[band];
-    const price = typeof v === 'number' && !Number.isNaN(v) ? formatValue(v) : '---';
+    const pv = getCrossPriceValue(v);
+    const price = pv != null ? formatValue(pv) : '---';
 
     content += `
       <div class="indicator-item"
@@ -342,11 +477,11 @@ function updateEmaCrossHistoryDisplay(element, crossPrices) {
     ema50: 'EMA(50)',
   };
 
-  const hasAny = Object.values(crossPrices || {}).some((v) => typeof v === 'number' && !Number.isNaN(v));
+  const hasAny = Object.values(crossPrices || {}).some((v) => getCrossPriceValue(v) != null);
 
   let content = `
     <div class="indicator-group-title" style="margin-bottom:6px;font-weight:600;">
-      EMAクロス履歴
+      EMAクロス履歴（${currentInterval}）
     </div>
   `;
 
@@ -363,7 +498,8 @@ function updateEmaCrossHistoryDisplay(element, crossPrices) {
 
   for (const ema of emas) {
     const v = crossPrices?.[ema];
-    const price = typeof v === 'number' && !Number.isNaN(v) ? formatValue(v) : '---';
+    const pv = getCrossPriceValue(v);
+    const price = pv != null ? formatValue(pv) : '---';
 
     content += `
       <div class="indicator-item"
@@ -376,66 +512,6 @@ function updateEmaCrossHistoryDisplay(element, crossPrices) {
 
   content += `</div>`;
   element.innerHTML = content;
-}
-
-/**
- * Checks if the current USD/JPY price has moved beyond the reset threshold
- * from any recorded cross price and resets them if so.
- */
-function checkAndResetCrossPrices() {
-  if (usdJpyCurrentPrice === null || currentXValue <= 0) return;
-
-  let updatedBb = false;
-  const clearedIndicators = [];
-
-  const bbBands = ['upper2', 'upper1', 'middle', 'lower1', 'lower2'];
-  for (const band of bbBands) {
-    if (latestCrossPrices[band] !== null && latestCrossPrices[band] !== undefined) {
-      if (Math.abs(usdJpyCurrentPrice - latestCrossPrices[band]) >= currentXValue) {
-        latestCrossPrices[band] = null;
-        updatedBb = true;
-        clearedIndicators.push(band);
-      }
-    }
-  }
-
-  if (updatedBb) {
-    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
-    if (usdJpyChartObj?.crossHistoryElement) {
-      updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
-      // ===== FIX: resize after DOM update
-      requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
-    }
-    saveCrossHistoryToLocalStorage();
-  }
-
-  let updatedEma = false;
-  const clearedEmaIndicators = [];
-
-  const emaBands = ['ema10', 'ema25', 'ema50'];
-  for (const ema of emaBands) {
-    if (latestEmaCrossPrices[ema] !== null && latestEmaCrossPrices[ema] !== undefined) {
-      if (Math.abs(usdJpyCurrentPrice - latestEmaCrossPrices[ema]) >= currentXValue) {
-        latestEmaCrossPrices[ema] = null;
-        updatedEma = true;
-        clearedEmaIndicators.push(ema);
-      }
-    }
-  }
-
-  if (updatedEma) {
-    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
-    if (usdJpyChartObj?.emaCrossHistoryElement) {
-      updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
-      // ===== FIX: resize after DOM update
-      requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
-    }
-    saveCrossHistoryToLocalStorage();
-  }
-
-  // clientで消したものを server(DB) も消して整合を取る（任意だが再表示の防止に効く）
-  const allCleared = [...clearedIndicators, ...clearedEmaIndicators];
-  if (allCleared.length > 0) clearCrossHistoryOnServer(allCleared);
 }
 
 /**
@@ -937,11 +1013,12 @@ async function renderChartForUsdJpy(interval) {
     const emaValuesElement = wrapper.querySelector('#ema-values-usdjpy');
     updateEmaValues(emaValuesElement, emaDataArray, emaPeriods);
 
+    // ✅ interval別の履歴を表示（現在選択interval）
     const crossHistoryElement = wrapper.querySelector('#cross-history-usdjpy');
-    updateCrossHistoryDisplay(crossHistoryElement, latestCrossPrices);
+    updateCrossHistoryDisplay(crossHistoryElement, getBbCrossMap(currentInterval));
 
     const emaCrossHistoryElement = wrapper.querySelector('#ema-cross-history-usdjpy');
-    updateEmaCrossHistoryDisplay(emaCrossHistoryElement, latestEmaCrossPrices);
+    updateEmaCrossHistoryDisplay(emaCrossHistoryElement, getEmaCrossMap(currentInterval));
 
     const dataOffset = data.length - bb1.length;
     const middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
@@ -1083,9 +1160,7 @@ async function start(dataType) {
   chartsContainer.innerHTML = '';
   chartObjects = [];
 
-  // NOTE: cross history は「閉じても残る」要件のため消さない
-  // latestCrossPrices / latestEmaCrossPrices は保持する
-
+  // NOTE: cross history は「閉じても残る」要件のため消さない（interval別に保持）
   usdJpyCurrentPrice = null;
 
   statusMessage.textContent = 'チャートを読み込んでいます...';
@@ -1106,6 +1181,9 @@ async function start(dataType) {
 
     const usdJpyChartObj = await renderChartForUsdJpy(currentInterval);
     if (usdJpyChartObj) chartObjects.push(usdJpyChartObj);
+
+    // 描画直後に履歴を再描画（interval別）
+    refreshUsdJpyCrossHistoryUI();
 
     statusMessage.textContent = `表示中: USD/JPY (${currentInterval}) - 30秒ごとに更新`;
     updateIntervalId = setInterval(refreshChartData, 30 * 1000);
@@ -1139,8 +1217,18 @@ applyIndicatorsButton.addEventListener('click', () => {
 
 intervalSelect.addEventListener('change', () => {
   currentInterval = intervalSelect.value;
+  updateXValueDisplay(currentInterval);
+  refreshUsdJpyCrossHistoryUI();
   saveUserSettings();
 });
+
+// ✅ 追加：ヘッダーのメール受信トグル change で保存
+if (emailAlertToggle) {
+  emailAlertToggle.addEventListener('change', () => {
+    updateEmailAlertToggleUI();
+    saveUserSettings();
+  });
+}
 
 subscribeButton.addEventListener('click', async () => {
   const email = emailInput.value;
@@ -1171,6 +1259,7 @@ subscribeButton.addEventListener('click', async () => {
   }
 });
 
+// ===== Email list panel =====
 toggleEmailListButton.addEventListener('click', async () => {
   const isHidden = emailListPanel.classList.contains('hidden');
   if (isHidden) {
@@ -1181,28 +1270,62 @@ toggleEmailListButton.addEventListener('click', async () => {
   }
 });
 
+// ✅ JSONが無い/壊れてる/空(204)でも落ちないようにする
+async function safeReadJson(response) {
+  // 204 No Content 対策
+  if (response.status === 204) return null;
+
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    // JSONじゃない場合はテキストをメッセージとして扱う
+    return { message: text };
+  }
+}
+
 async function deleteEmail(email) {
   statusMessage.textContent = `メールアドレス ${email} を削除中...`;
+
   try {
-    const response = await fetch(`/api/emails/${email}`, { method: 'DELETE' });
-    const result = await response.json();
+    const response = await fetch(`/api/emails/${encodeURIComponent(email)}`, {
+      method: 'DELETE',
+      credentials: 'include', // ✅ 別オリジン/セッション対策（同一オリジンでも害なし）
+    });
+
+    const result = await safeReadJson(response);
+
     if (response.ok) {
-      statusMessage.textContent = result.message;
+      statusMessage.textContent = result?.message || '削除しました。';
       await refreshEmailList();
-    } else {
-      throw new Error(result.error || '削除に失敗しました。');
+      return;
     }
+
+    throw new Error(result?.error || `削除に失敗しました。(HTTP ${response.status})`);
   } catch (error) {
     console.error('Email deletion error:', error);
-    statusMessage.textContent = error.message;
+    statusMessage.textContent = error?.message || '削除に失敗しました。';
   }
 }
 
 async function refreshEmailList() {
   try {
-    const response = await fetch('/api/emails');
-    if (!response.ok) throw new Error('Could not fetch email list.');
-    const emails = await response.json();
+    const response = await fetch('/api/emails', {
+      credentials: 'include', // ✅
+    });
+
+    // 401/403 のときはUIに出す
+    if (!response.ok) {
+      const err = await safeReadJson(response);
+      throw new Error(err?.error || `メール一覧を取得できませんでした。(HTTP ${response.status})`);
+    }
+
+    const data = await safeReadJson(response);
+
+    // ✅ APIが配列でも {emails:[...]} でも吸収
+    const emails = Array.isArray(data) ? data : Array.isArray(data?.emails) ? data.emails : [];
 
     emailList.innerHTML = '';
 
@@ -1210,36 +1333,41 @@ async function refreshEmailList() {
       const li = document.createElement('li');
       li.textContent = '登録されているメールアドレスはありません。';
       emailList.appendChild(li);
-    } else {
-      emails.forEach((item) => {
-        const li = document.createElement('li');
-
-        const emailSpan = document.createElement('span');
-        emailSpan.textContent = item.email;
-        li.appendChild(emailSpan);
-
-        li.classList.add('email-list-item');
-
-        if (currentUserEmail && item.email === currentUserEmail) {
-          const deleteButton = document.createElement('button');
-          deleteButton.textContent = '削除';
-          deleteButton.classList.add('delete-email-button');
-          deleteButton.dataset.email = item.email;
-
-          deleteButton.addEventListener('click', async (event) => {
-            event.stopPropagation();
-            const emailToDelete = event.target.dataset.email;
-            await deleteEmail(emailToDelete);
-          });
-
-          li.appendChild(deleteButton);
-        }
-        emailList.appendChild(li);
-      });
+      return;
     }
+
+    const me = (currentUserEmail || '').toLowerCase();
+
+    emails.forEach((item) => {
+      const li = document.createElement('li');
+      li.classList.add('email-list-item');
+
+      const emailText = String(item?.email ?? '');
+      const emailSpan = document.createElement('span');
+      emailSpan.textContent = emailText;
+      li.appendChild(emailSpan);
+
+      // ✅ 大文字/小文字揺れでも一致させる
+      if (me && emailText.toLowerCase() === me) {
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.textContent = '削除';
+        deleteButton.classList.add('delete-email-button');
+
+        deleteButton.addEventListener('click', async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          await deleteEmail(emailText);
+        });
+
+        li.appendChild(deleteButton);
+      }
+
+      emailList.appendChild(li);
+    });
   } catch (error) {
     console.error('Failed to refresh email list:', error);
-    statusMessage.textContent = 'メールリストの更新に失敗しました。';
+    statusMessage.textContent = error?.message || 'メールリストの更新に失敗しました。';
   }
 }
 
@@ -1268,6 +1396,7 @@ stockToggle.addEventListener('click', () => {
   usdJpyToggle.classList.remove('active');
   updateIntervalOptions(stockIntervalOptions, '1d');
   updateTickerInputVisibility();
+  currentInterval = intervalSelect.value;
   start(currentDataType);
   saveUserSettings();
 });
@@ -1278,6 +1407,7 @@ usdJpyToggle.addEventListener('click', () => {
   stockToggle.classList.remove('active');
   updateIntervalOptions(usdJpyIntervalOptions, '1d');
   updateTickerInputVisibility();
+  currentInterval = intervalSelect.value;
   start(currentDataType);
   saveUserSettings();
 });
@@ -1295,13 +1425,19 @@ async function saveUserSettings() {
     ema1Period: ema1PeriodInput.value,
     ema2Period: ema2PeriodInput.value,
     ema3Period: ema3PeriodInput.value,
+
+    // ✅ 追加：メール受信ON/OFF（未ログイン等で要素が無い場合はtrue扱い）
+    emailAlertsEnabled: emailAlertToggle ? !!emailAlertToggle.checked : true,
+
+    // ✅ ここが重要：掃除した x_values だけ送る（消したものが復活しない）
+    x_values: buildCleanXValues(),
   };
 
   try {
     const response = await fetch('/api/user/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings),
+      body: JSON.stringify(settings), // ✅ server側はトップレベル想定（互換はserverで吸収）
     });
     if (!response.ok) console.error('Failed to save user settings.');
   } catch (error) {
@@ -1311,15 +1447,27 @@ async function saveUserSettings() {
 
 async function loadUserSettings() {
   try {
-    const response = await fetch('/api/user/settings');
+    const response = await fetch(`/api/user/settings?_=${Date.now()}`);
     if (response.ok) {
-      const settings = await response.json();
+      const raw = await response.json();
+      // --- FIX: Flatten the settings object to handle corrupted data ---
+      // This ensures top-level properties (which are newer) overwrite older, nested ones.
+      const settings = { ...(raw.settings || {}), ...raw };
+      delete settings.settings;
+      // --- END FIX ---
+
       if (Object.keys(settings).length > 0) {
-        // ✅ サーバーに保存されている crossHistory を復元
+        // ✅ サーバーに保存されている crossHistory を復元（interval別対応）
         applyCrossHistoryFromServer(settings.realTimeState?.crossHistory);
+
+        // ✅ x_values は「正の数だけ」に正規化して保持（0.001勝手復活の温床を除去）
+        currentUserXValues = settings.x_values && typeof settings.x_values === 'object' ? settings.x_values : {};
+        currentUserXValues = buildCleanXValues();
 
         currentDataType = settings.currentDataType || 'stock';
         intervalSelect.value = settings.currentInterval || '1d';
+        currentInterval = intervalSelect.value;
+
         tickersInput.value = settings.tickersInput || '7203';
         areBollingerBandsVisible = settings.areBollingerBandsVisible !== undefined ? settings.areBollingerBandsVisible : true;
         areEmaVisible = settings.areEmaVisible !== undefined ? settings.areEmaVisible : true;
@@ -1329,7 +1477,13 @@ async function loadUserSettings() {
         ema2PeriodInput.value = settings.ema2Period || '25';
         ema3PeriodInput.value = settings.ema3Period || '50';
 
-        checkAndResetCrossPrices();
+        // ✅ 追加：メール受信トグル復元（未設定はON）
+        if (emailAlertToggle) {
+          emailAlertToggle.checked = settings.emailAlertsEnabled !== false;
+          updateEmailAlertToggleUI();
+        }
+
+        updateXValueDisplay(currentInterval);
 
         if (currentDataType === 'stock') {
           stockToggle.classList.add('active');
@@ -1359,50 +1513,24 @@ async function loadUserSettings() {
   }
 }
 
-// --- Authentication Functions ---
-async function fetchUserXValue() {
-  try {
-    const response = await fetch('/api/user/x_value');
-    if (response.ok) {
-      const data = await response.json();
-      currentXValue = parseFloat(data.x_value);
-      currentXValueSpan.textContent = `現在のX値: ${currentXValue.toFixed(3)}`;
-      xValueInput.value = currentXValue.toFixed(3);
-      xValueControls.classList.remove('hidden');
-    } else {
-      xValueControls.classList.add('hidden');
-    }
-  } catch (error) {
-    console.error('Network error fetching user x_value:', error);
-    xValueControls.classList.add('hidden');
-  }
-}
+// --- Authentication & X-Value Functions ---
+// ✅ 未設定なら空欄＋「未設定」表示（0.001を見せない）
+function updateXValueDisplay(interval) {
+  if (xValueControls.classList.contains('hidden')) return;
 
-async function saveUserXValue() {
-  const newXValue = parseFloat(xValueInput.value);
-  if (isNaN(newXValue)) {
-    alert('有効な数値を入力してください。');
+  const iv = interval; // 表示は常にUI選択に合わせる
+  xValueIntervalLabel.textContent = iv;
+
+  const v = getXValueForInterval(iv);
+
+  if (v == null) {
+    currentXValueSpan.textContent = '現在の値: 未設定';
+    xValueInput.value = '';
     return;
   }
 
-  try {
-    const response = await fetch('/api/user/x_value', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ x_value: newXValue }),
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      currentXValue = parseFloat(data.x_value);
-      currentXValueSpan.textContent = `現在のX値: ${currentXValue.toFixed(3)}`;
-    } else {
-      const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-      console.error('Error saving x_value:', errorData.error);
-    }
-  } catch (error) {
-    console.error('Network error saving user x_value:', error);
-  }
+  currentXValueSpan.textContent = `現在の値: ${formatValue(v)}`;
+  xValueInput.value = formatValue(v);
 }
 
 async function checkAuthStatus() {
@@ -1420,33 +1548,61 @@ async function checkAuthStatus() {
       loginButton.classList.add('hidden');
       registerButton.classList.add('hidden');
       logoutButton.classList.remove('hidden');
+      xValueControls.classList.remove('hidden');
+
+      // ✅ 追加：ログイン中だけヘッダーにトグルを出す
+      if (emailAlertToggleContainer) emailAlertToggleContainer.classList.remove('hidden');
+      if (emailAlertToggle) {
+        emailAlertToggle.checked = true; // loadUserSettingsで上書きされる
+        updateEmailAlertToggleUI();
+      }
+
+      // ✅ 先に空欄にして、HTMLの初期値(0.001等)が見えないようにする
+      try {
+        xValueInput.value = '';
+        currentXValueSpan.textContent = '現在の値: 読み込み中...';
+      } catch {}
 
       // まず localStorage から復元（サーバー復元までの保険）
       loadCrossHistoryFromLocalStorage();
 
-      fetchUserXValue();
-      loadUserSettings();
+      // ✅ ここで(再)接続：ログイン後に socket に session を乗せる
+      connectSocket();
+      await loadUserSettings();
+      // session を reload して userId を socket に反映（ログイン直後でも効く）
+      try {
+        socket?.emit('auth_sync');
+      } catch {}
     } else {
       // 未ログイン時は過去ユーザーの履歴を見せない
       currentUserEmail = null;
       lsKeySuffix = 'guest';
-      latestCrossPrices = {};
-      latestEmaCrossPrices = {};
+      latestCrossPricesByInterval = {};
+      latestEmaCrossPricesByInterval = {};
+      currentUserXValues = {};
       clearCrossHistoryLocalStorage();
+
+      // ✅ ヘッダーのトグルは隠す
+      if (emailAlertToggleContainer) emailAlertToggleContainer.classList.add('hidden');
 
       userInfoSpan.classList.add('hidden');
       loginButton.classList.remove('hidden');
       registerButton.classList.remove('hidden');
       logoutButton.classList.add('hidden');
       xValueControls.classList.add('hidden');
+      connectSocket();
       start(currentDataType);
     }
   } catch (error) {
     currentUserEmail = null;
     lsKeySuffix = 'guest';
-    latestCrossPrices = {};
-    latestEmaCrossPrices = {};
+    latestCrossPricesByInterval = {};
+    latestEmaCrossPricesByInterval = {};
+    currentUserXValues = {};
     clearCrossHistoryLocalStorage();
+
+    // ✅ ヘッダーのトグルは隠す
+    if (emailAlertToggleContainer) emailAlertToggleContainer.classList.add('hidden');
 
     console.error('Failed to check authentication status:', error);
     userInfoSpan.classList.add('hidden');
@@ -1454,6 +1610,7 @@ async function checkAuthStatus() {
     registerButton.classList.remove('hidden');
     logoutButton.classList.add('hidden');
     xValueControls.classList.add('hidden');
+    connectSocket();
     start(currentDataType);
   }
 }
@@ -1469,9 +1626,14 @@ async function handleLogout() {
 
       currentUserEmail = null;
       lsKeySuffix = 'guest';
-      latestCrossPrices = {};
-      latestEmaCrossPrices = {};
+      latestCrossPricesByInterval = {};
+      latestEmaCrossPricesByInterval = {};
+      currentUserXValues = {};
       xValueControls.classList.add('hidden');
+
+      // ✅ 追加：ログアウト時はヘッダーのトグルも隠す
+      if (emailAlertToggleContainer) emailAlertToggleContainer.classList.add('hidden');
+
       await checkAuthStatus();
     } else {
       alert(data.error || 'ログアウトに失敗しました。');
@@ -1483,7 +1645,140 @@ async function handleLogout() {
 }
 
 logoutButton.addEventListener('click', handleLogout);
-saveXValueButton.addEventListener('click', saveUserXValue);
+
+// ✅ 空欄＝削除として保存（復活しない）
+// ✅ 0以下は無効
+saveXValueButton.addEventListener('click', () => {
+  const iv = intervalSelect.value;
+  const raw = String(xValueInput.value ?? '').trim();
+
+  // 空欄＝削除
+  if (raw === '') {
+    if (hasOwn(currentUserXValues, iv)) delete currentUserXValues[iv];
+    updateXValueDisplay(iv);
+    saveUserSettings();
+    return;
+  }
+
+  const n = normalizeXValue(raw);
+  if (n == null) {
+    alert('0より大きい数値を入力してください。（空欄は削除になります）');
+    return;
+  }
+
+  currentUserXValues[iv] = n;
+  updateXValueDisplay(iv);
+  saveUserSettings();
+});
+
+// ✅ Chromeの「×」でクリアして保存ボタン押し忘れでも消えるようにする
+xValueInput.addEventListener('blur', () => {
+  const iv = intervalSelect.value;
+  const raw = String(xValueInput.value ?? '').trim();
+
+  if (raw === '' && hasOwn(currentUserXValues, iv)) {
+    delete currentUserXValues[iv];
+    updateXValueDisplay(iv);
+    saveUserSettings();
+  }
+});
+
+deleteXValueButton.addEventListener('click', () => {
+  const iv = intervalSelect.value;
+  if (hasOwn(currentUserXValues, iv)) {
+    delete currentUserXValues[iv];
+  }
+  xValueInput.value = '';
+  updateXValueDisplay(iv);
+  saveUserSettings();
+});
+
+// =========================
+// Socket connection (FIX)
+// =========================
+function connectSocket() {
+  try {
+    if (socket) socket.disconnect();
+  } catch {}
+  socket = io(window.location.origin, { withCredentials: true });
+
+  socket.on('connect', () => {
+    console.log('Connected to WebSocket server!');
+    try {
+      socket.emit('auth_sync');
+    } catch {}
+  });
+
+  socket.on('bb_cross', async (data) => {
+    console.log('BB Cross event received:', data);
+    if (notificationElement) {
+      notificationElement.textContent = data.message;
+      notificationElement.classList.remove('hidden');
+    }
+
+    const iv = data.interval || currentInterval || intervalSelect.value || 'unknown';
+    ensureIntervalMap(latestCrossPricesByInterval, iv)[data.bandName] = {
+      price: data.price,
+      interval: iv,
+      timestamp: typeof data.timestamp === 'string' ? data.timestamp : null,
+    };
+    saveCrossHistoryToLocalStorage();
+
+    refreshUsdJpyCrossHistoryUI();
+    setTimeout(() => notificationElement?.classList.add('hidden'), 5000);
+  });
+
+  socket.on('ema_cross', async (data) => {
+    console.log('EMA Cross event received:', data);
+    if (notificationElement) {
+      notificationElement.textContent = data.message;
+      notificationElement.classList.remove('hidden');
+    }
+
+    const iv = data.interval || currentInterval || intervalSelect.value || 'unknown';
+    ensureIntervalMap(latestEmaCrossPricesByInterval, iv)[data.emaName] = {
+      price: data.price,
+      interval: iv,
+      timestamp: typeof data.timestamp === 'string' ? data.timestamp : null,
+    };
+    saveCrossHistoryToLocalStorage();
+
+    refreshUsdJpyCrossHistoryUI();
+    setTimeout(() => notificationElement?.classList.add('hidden'), 5000);
+  });
+
+  // ✅ serverが「メール送信→DBのcrossHistoryをnullにした」ことを通知
+  socket.on('cross_history_cleared', (data) => {
+    try {
+      const indicatorName = data?.indicatorName;
+      const iv = data?.interval || currentInterval || intervalSelect.value || 'unknown';
+      if (!indicatorName) return;
+
+      if (String(indicatorName).startsWith('ema')) {
+        ensureIntervalMap(latestEmaCrossPricesByInterval, iv)[String(indicatorName)] = null;
+      } else {
+        ensureIntervalMap(latestCrossPricesByInterval, iv)[String(indicatorName)] = null;
+      }
+      saveCrossHistoryToLocalStorage();
+      refreshUsdJpyCrossHistoryUI();
+    } catch (e) {
+      console.warn('Failed to apply cross_history_cleared:', e);
+    }
+  });
+
+  socket.on('usd_jpy_price_update', (data) => {
+    usdJpyCurrentPrice = data.price;
+
+    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
+    if (usdJpyChartObj?.currentPriceValuesElement) {
+      updateCurrentPriceValue(usdJpyChartObj.currentPriceValuesElement, [{ close: data.price }]);
+    }
+
+    // ✅ 重要：ここで閾値判定して crossHistory を消さない（メール送信はserverが担当）
+  });
+
+  socket.on('disconnect', () => console.log('Disconnected from WebSocket server.'));
+}
 
 // --- Initial Load ---
 document.addEventListener('DOMContentLoaded', async () => {
@@ -1498,69 +1793,5 @@ document.addEventListener('DOMContentLoaded', async () => {
   updateTickerInputVisibility();
 
   // ✅ 認証状態確定（lsKeySuffix確定）後に socket を張る
-  await checkAuthStatus();
-
-  socket = io(`${window.location.protocol}//${window.location.hostname}:3000`);
-
-  socket.on('connect', () => {
-    console.log('Connected to WebSocket server!');
-  });
-
-  socket.on('bb_cross', async (data) => {
-    console.log('BB Cross event received:', data);
-
-    notificationElement.textContent = data.message;
-    notificationElement.classList.remove('hidden');
-
-    latestCrossPrices[data.bandName] = data.price;
-    saveCrossHistoryToLocalStorage();
-
-    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
-    if (usdJpyChartObj?.crossHistoryElement) {
-      updateCrossHistoryDisplay(usdJpyChartObj.crossHistoryElement, latestCrossPrices);
-
-      // ===== FIX: resize after DOM update (prevents layout break)
-      requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
-    }
-
-    setTimeout(() => {
-      notificationElement.classList.add('hidden');
-    }, 5000);
-  });
-
-  socket.on('ema_cross', async (data) => {
-    console.log('EMA Cross event received:', data);
-
-    notificationElement.textContent = data.message;
-    notificationElement.classList.remove('hidden');
-
-    latestEmaCrossPrices[data.emaName] = data.price;
-    saveCrossHistoryToLocalStorage();
-
-    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
-    if (usdJpyChartObj?.emaCrossHistoryElement) {
-      updateEmaCrossHistoryDisplay(usdJpyChartObj.emaCrossHistoryElement, latestEmaCrossPrices);
-
-      // ===== FIX: resize after DOM update (prevents layout break)
-      requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
-    }
-
-    setTimeout(() => {
-      notificationElement.classList.add('hidden');
-    }, 5000);
-  });
-
-  socket.on('disconnect', () => {
-    console.log('Disconnected from WebSocket server.');
-  });
-
-  socket.on('usd_jpy_price_update', (data) => {
-    usdJpyCurrentPrice = data.price;
-    checkAndResetCrossPrices();
-
-    const usdJpyChartObj = chartObjects.find((obj) => obj?.ticker === 'USDJPY=X');
-    if (usdJpyChartObj?.currentPriceValuesElement) {
-      updateCurrentPriceValue(usdJpyChartObj.currentPriceValuesElement, [{ close: data.price }]);
-    }
-  });
+  await checkAuthStatus(); // checkAuthStatus内でconnectSocket()される
 });
