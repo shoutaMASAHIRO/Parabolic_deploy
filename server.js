@@ -255,7 +255,7 @@ const sessionMiddleware = session({
     sameSite: 'lax',
     secure: COOKIE_SECURE,
     httpOnly: true,
-    maxAge: 1000 * 60 * 60 * 24,
+    maxAge: 1000 * 60 * 60 * 24 * 7,
   },
 });
 app.use(sessionMiddleware);
