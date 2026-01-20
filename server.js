@@ -127,6 +127,68 @@ function normalizeCrossHistoryToNested(crossHistory, fallbackInterval) {
   return nested;
 }
 
+/**
+ * ✅ NEW: crypto crossHistory / dedup timestamps を「tickerごと」に分離
+ * v3:
+ *   realTimeState.cryptoCrossHistoryByTicker[ticker][interval][indicator] = {price,timestamp,interval} | null
+ *   realTimeState.cryptoLastCrossTimestampsByTicker[ticker][interval][indicator] = tsIso
+ *
+ * 旧:
+ *   realTimeState.cryptoCrossHistory (interval別のみ)
+ *   realTimeState.cryptoLastCrossTimestamps (interval別のみ)
+ * を見つけたら、指定tickerにmigrateする（破壊的移行：旧キーは削除）
+ */
+function ensureCryptoPerTickerState(realTimeState, ticker, fallbackInterval) {
+  const t = String(ticker || 'UNKNOWN');
+  const fb = fallbackInterval || 'unknown';
+
+  if (!realTimeState || typeof realTimeState !== 'object') {
+    return { crossHistoryByInterval: {}, lastTsByInterval: {}, ticker: t };
+  }
+
+  // containers
+  if (!realTimeState.cryptoCrossHistoryByTicker || typeof realTimeState.cryptoCrossHistoryByTicker !== 'object') {
+    realTimeState.cryptoCrossHistoryByTicker = {};
+  }
+  if (!realTimeState.cryptoCrossHistoryByTicker[t] || typeof realTimeState.cryptoCrossHistoryByTicker[t] !== 'object') {
+    realTimeState.cryptoCrossHistoryByTicker[t] = {};
+  }
+
+  if (!realTimeState.cryptoLastCrossTimestampsByTicker || typeof realTimeState.cryptoLastCrossTimestampsByTicker !== 'object') {
+    realTimeState.cryptoLastCrossTimestampsByTicker = {};
+  }
+  if (
+    !realTimeState.cryptoLastCrossTimestampsByTicker[t] ||
+    typeof realTimeState.cryptoLastCrossTimestampsByTicker[t] !== 'object'
+  ) {
+    realTimeState.cryptoLastCrossTimestampsByTicker[t] = {};
+  }
+
+  // migrate legacy -> byTicker[t] (only if target is still empty)
+  const targetEmpty = Object.keys(realTimeState.cryptoCrossHistoryByTicker[t] || {}).length === 0;
+
+  if (targetEmpty && realTimeState.cryptoCrossHistory && typeof realTimeState.cryptoCrossHistory === 'object') {
+    realTimeState.cryptoCrossHistoryByTicker[t] = normalizeCrossHistoryToNested(realTimeState.cryptoCrossHistory, fb);
+    delete realTimeState.cryptoCrossHistory;
+  } else {
+    // ensure nested format for safety
+    realTimeState.cryptoCrossHistoryByTicker[t] = normalizeCrossHistoryToNested(realTimeState.cryptoCrossHistoryByTicker[t], fb);
+  }
+
+  const tsTargetEmpty = Object.keys(realTimeState.cryptoLastCrossTimestampsByTicker[t] || {}).length === 0;
+  if (tsTargetEmpty && realTimeState.cryptoLastCrossTimestamps && typeof realTimeState.cryptoLastCrossTimestamps === 'object') {
+    // legacy structure is already { interval: { indicator: tsIso } }
+    realTimeState.cryptoLastCrossTimestampsByTicker[t] = realTimeState.cryptoLastCrossTimestamps;
+    delete realTimeState.cryptoLastCrossTimestamps;
+  }
+
+  return {
+    crossHistoryByInterval: realTimeState.cryptoCrossHistoryByTicker[t],
+    lastTsByInterval: realTimeState.cryptoLastCrossTimestampsByTicker[t],
+    ticker: t,
+  };
+}
+
 // This function fetches credentials from AWS Parameter Store and configures Nodemailer
 async function configureNodemailer() {
   try {
@@ -337,8 +399,6 @@ function getDaysToFetchForInterval(interval) {
 }
 
 // ユーザーごとの「監視対象 interval」を決定（ドル円用）
-// ✅ x_values に設定がある interval は全て監視
-// ✅ 互換のため currentInterval も含める（UIで見ている足は従来通りクロス通知したい）
 function getUserMonitoredIntervals(settings) {
   const out = new Set();
   const currentInterval = settings?.currentInterval;
@@ -356,7 +416,6 @@ function getUserMonitoredIntervals(settings) {
 }
 
 // ✅ 追加：仮想通貨の「監視対象 interval」を決定（crypto_x_values を見る）
-// ✅ currentInterval も含める（UIで見ている足はクロス通知したい）
 function getUserMonitoredIntervalsForCrypto(settings, ticker) {
   const out = new Set();
   const currentInterval = settings?.currentInterval;
@@ -509,8 +568,7 @@ async function fetchQuotesForWatcher(ticker, interval) {
 }
 
 /**
- * ✅ 追加：USD/JPY現在値を「quote → ダメなら chart」で取得
- * quote が 403/429 で落ちても watcher を止めないための仕組み
+ * ✅ 追加：現在値を「quote → ダメなら chart」で取得
  */
 async function fetchCurrentPrice(ticker) {
   // ① quote（速いが弾かれやすい）
@@ -533,7 +591,7 @@ async function fetchCurrentPrice(ticker) {
     console.error(`Yahoo quote fetch error for ${ticker}:`, e);
   }
 
-  // ② fallback：chart の最新 close を現在値扱い（通りやすい）
+  // ② fallback：chart の最新 close
   try {
     const period2 = new Date();
     const period1 = new Date(period2.getTime() - 2 * 24 * 60 * 60 * 1000);
@@ -653,14 +711,10 @@ app.get('/api/user/settings', async (req, res) => {
   }
 });
 
-// ✅ 修正：ユーザー設定保存は「JSONBマージ」ではなく、
-//   - 基本は currentSettings と incoming をアプリ側でマージ
-//   - x_values は incoming が来た時だけ「置き換え」(削除を反映するため)
-//   - realTimeState は原則保持（incomingにある時だけ上書き）
+// ✅ 修正：ユーザー設定保存は「JSONBマージ」ではなく、フラット化して保存
 app.post('/api/user/settings', async (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated.' });
 
-  // ✅ 旧形式 { settings: {...} } も受ける（client側移行中の互換）
   const incoming =
     req.body && req.body.settings && typeof req.body.settings === 'object' ? req.body.settings : req.body;
 
@@ -668,7 +722,6 @@ app.post('/api/user/settings', async (req, res) => {
     const currentRes = await pool.query('SELECT settings FROM user_settings WHERE user_id = $1', [req.session.userId]);
     const current = currentRes.rows?.[0]?.settings || {};
 
-    // --- FIX: Flatten the object structure to remove nesting ---
     const cleanCurrent = { ...(current.settings || {}), ...current };
     delete cleanCurrent.settings;
 
@@ -676,7 +729,6 @@ app.post('/api/user/settings', async (req, res) => {
       ...cleanCurrent,
       ...incoming,
     };
-    // --- END FIX ---
 
     const result = await pool.query(
       `
@@ -698,9 +750,7 @@ app.post('/api/user/settings', async (req, res) => {
   }
 });
 
-// ✅ 追加：client側でクロス履歴をクリアしたら server(DB)側もクリアして整合を取る
-// v2: interval省略時は「全intervalに対して」クリア
-// ✅ 追加：dedup用 lastCrossTimestamps も一緒に消す（手動リセット時に同ローソクで再通知できるように）
+// ✅ cross_history clear（USDJPY）
 app.post('/api/user/cross_history/clear', async (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated.' });
 
@@ -716,7 +766,6 @@ app.post('/api/user/cross_history/clear', async (req, res) => {
     const realTimeState = settings.realTimeState || {};
     const nested = normalizeCrossHistoryToNested(realTimeState.crossHistory || {}, settings.currentInterval || '5m');
 
-    // dedup map
     const lastCrossTimestamps =
       realTimeState.lastCrossTimestamps && typeof realTimeState.lastCrossTimestamps === 'object'
         ? realTimeState.lastCrossTimestamps
@@ -839,7 +888,6 @@ app.post('/api/send-emails', async (req, res) => {
       html: '<p>おめでとうございます。条件達成です。</p>',
     };
 
-    // ✅ 追加：サイト追記
     mailOptions = { ...mailOptions, ...appendSiteBlockToMail(mailOptions.text, mailOptions.html) };
 
     for (const email of emails) {
@@ -862,7 +910,7 @@ app.get('/api/crypto/tickers', async (req, res) => {
   const hardcodedTickers = [
     'ADA-USD', 'AVAX-USD', 'BCH-USD', 'BTC-USD', 'DOGE-USD', 'DOT-USD',
     'ETH-USD', 'LINK-USD', 'LTC-USD', 'MATIC-USD', 'SOL-USD', 'UNI-USD', 'XRP-USD'
-  ].sort(); // Ensure it's always sorted
+  ].sort();
 
   res.json(hardcodedTickers);
 });
@@ -889,7 +937,6 @@ app.get('/api/data', async (req, res) => {
   let daysToFetch = getDaysToFetchForInterval(interval);
   let actualInterval = interval;
 
-  // Yahooが4h/8hを受けないので、endpointでは従来通り1h取得（client側集約もあるが、ここは互換）
   if (interval === '4h' || interval === '8h') {
     actualInterval = '1h';
   }
@@ -959,7 +1006,6 @@ app.get('/api/usd_jpy_data', async (req, res) => {
  * ★ interval を引数で受け取り、メールに表示する（ドル円）
  */
 async function sendThresholdEmail(user, indicatorName, crossedPrice, currentPrice, crossedTimestamp, intervalForEmail, userThreshold) {
-  // ✅ ユーザーがメール受信OFFなら送らない
   try {
     const settings = user?.settings || {};
     if (settings.emailAlertsEnabled === false) {
@@ -1152,7 +1198,6 @@ async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, inte
 
     const indicatorValues = {};
 
-    // Calculate BB
     const bbResult1 = BollingerBands.calculate({ period: bbPeriod, values: closePrices, stdDev: 1 });
     const bbResult2 = BollingerBands.calculate({ period: bbPeriod, values: closePrices, stdDev: bbStdDev });
 
@@ -1164,7 +1209,6 @@ async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, inte
       indicatorValues['lower2'] = { last: bbResult2[bbResult2.length - 1].lower, secondLast: bbResult2[bbResult2.length - 2].lower };
     }
 
-    // Calculate EMA
     emaPeriods.forEach((p) => {
       const emaResult = EMA.calculate({ period: p, values: closePrices });
       if (emaResult.length >= 2) {
@@ -1172,15 +1216,12 @@ async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, inte
       }
     });
 
-    // Ensure state shape（v2: interval別）
     if (!realTimeState.crossHistory) realTimeState.crossHistory = {};
     if (!realTimeState.crossHistory[userInterval]) realTimeState.crossHistory[userInterval] = {};
 
-    // ✅ dedup map
     if (!realTimeState.lastCrossTimestamps) realTimeState.lastCrossTimestamps = {};
     if (!realTimeState.lastCrossTimestamps[userInterval]) realTimeState.lastCrossTimestamps[userInterval] = {};
 
-    // Check for crosses (終値 vs indicator)
     for (const indicatorName in indicatorValues) {
       const { last, secondLast } = indicatorValues[indicatorName];
       if (last === undefined || secondLast === undefined) continue;
@@ -1193,7 +1234,6 @@ async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, inte
         const crossTimestamp = lastCandle.date;
         const tsIso = crossTimestamp instanceof Date ? crossTimestamp.toISOString() : new Date(crossTimestamp).toISOString();
 
-        // ✅ 同一ローソクの重複検知を防ぐ
         const lastSeenTs = realTimeState.lastCrossTimestamps[userInterval]?.[indicatorName];
         if (lastSeenTs === tsIso) {
           continue;
@@ -1239,12 +1279,13 @@ async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, inte
 
 /**
  * ✅ クロス判定（終値＝SMA(1) と BB/EMA のクロス）仮想通貨
- * ✅ FIX: イベント名を crypto_* にして、client側のドル円 crossHistory と混線しないようにする
+ * ✅ FIX: tickerごとに crossHistory を分離（BTCとBCHが混ざらない）
  */
 async function monitorSma1ValueForCrypto(user, quotes, realTimeState, socketMap, io, intervalLabel, assetDisplayName) {
   let stateChanged = false;
   const settings = user.settings || {};
   const userInterval = intervalLabel || settings.currentInterval || '5m';
+  const ticker = String(assetDisplayName || settings.currentCryptoTicker || 'UNKNOWN');
 
   try {
     const minDataPoints = 55;
@@ -1283,11 +1324,11 @@ async function monitorSma1ValueForCrypto(user, quotes, realTimeState, socketMap,
       }
     });
 
-    if (!realTimeState.cryptoCrossHistory) realTimeState.cryptoCrossHistory = {};
-    if (!realTimeState.cryptoCrossHistory[userInterval]) realTimeState.cryptoCrossHistory[userInterval] = {};
+    // ✅ per-ticker containers（migrate込み）
+    const { crossHistoryByInterval, lastTsByInterval } = ensureCryptoPerTickerState(realTimeState, ticker, settings.currentInterval || '5m');
 
-    if (!realTimeState.cryptoLastCrossTimestamps) realTimeState.cryptoLastCrossTimestamps = {};
-    if (!realTimeState.cryptoLastCrossTimestamps[userInterval]) realTimeState.cryptoLastCrossTimestamps[userInterval] = {};
+    if (!crossHistoryByInterval[userInterval]) crossHistoryByInterval[userInterval] = {};
+    if (!lastTsByInterval[userInterval]) lastTsByInterval[userInterval] = {};
 
     for (const indicatorName in indicatorValues) {
       const { last, secondLast } = indicatorValues[indicatorName];
@@ -1301,14 +1342,12 @@ async function monitorSma1ValueForCrypto(user, quotes, realTimeState, socketMap,
         const crossTimestamp = lastCandle.date;
         const tsIso = crossTimestamp instanceof Date ? crossTimestamp.toISOString() : new Date(crossTimestamp).toISOString();
 
-        const lastSeenTs = realTimeState.cryptoLastCrossTimestamps[userInterval]?.[indicatorName];
-        if (lastSeenTs === tsIso) {
-          continue;
-        }
+        const lastSeenTs = lastTsByInterval[userInterval]?.[indicatorName];
+        if (lastSeenTs === tsIso) continue;
 
-        realTimeState.cryptoLastCrossTimestamps[userInterval][indicatorName] = tsIso;
+        lastTsByInterval[userInterval][indicatorName] = tsIso;
 
-        realTimeState.cryptoCrossHistory[userInterval][indicatorName] = {
+        crossHistoryByInterval[userInterval][indicatorName] = {
           price: crossPrice,
           timestamp: tsIso,
           interval: userInterval,
@@ -1318,15 +1357,15 @@ async function monitorSma1ValueForCrypto(user, quotes, realTimeState, socketMap,
         const indicatorLabel = getIndicatorDisplayName(indicatorName);
 
         console.log(
-          `User ${user.id}: ${assetDisplayName} CRYPTO cross detected for ${indicatorName}(${indicatorLabel}) at price ${crossPrice} on interval ${userInterval}`
+          `User ${user.id}: ${ticker} CRYPTO cross detected for ${indicatorName}(${indicatorLabel}) at price ${crossPrice} on interval ${userInterval}`
         );
 
         const socketId = socketMap.get(user.id);
         if (socketId) {
           const eventName = indicatorName.startsWith('ema') ? 'crypto_ema_cross' : 'crypto_bb_cross';
           const eventPayload = {
-            ticker: assetDisplayName,
-            message: `${assetDisplayName}が ${indicatorLabel} を終値で${lastRelPosition === 'above' ? '上抜け' : '下抜け'}しました！ (間隔: ${userInterval})`,
+            ticker,
+            message: `${ticker}が ${indicatorLabel} を終値で${lastRelPosition === 'above' ? '上抜け' : '下抜け'}しました！ (間隔: ${userInterval})`,
             price: crossPrice,
             crossDirection: lastRelPosition === 'above' ? 'up' : 'down',
             timestamp: tsIso,
@@ -1351,7 +1390,7 @@ async function startPriceWatcher() {
   let isTickRunning = false;
 
   setInterval(async () => {
-    if (isTickRunning) return; // ✅ ループの重複実行を防ぐ
+    if (isTickRunning) return;
     isTickRunning = true;
 
     try {
@@ -1378,7 +1417,7 @@ async function startPriceWatcher() {
         io.emit('usd_jpy_price_update', { price: currentPrice, timestamp: new Date() });
       }
 
-      const perUserIntervals = new Map(); // userId -> [interval...]
+      const perUserIntervals = new Map();
       const allIntervals = new Set();
 
       for (const user of users) {
@@ -1408,7 +1447,6 @@ async function startPriceWatcher() {
 
         let stateChanged = false;
 
-        // Part 1: X-Value threshold using live price（live price がある時だけ）
         if (currentPrice != null) {
           const x_values = settings.x_values || {};
           const crossHistory = realTimeState.crossHistory || {};
@@ -1454,7 +1492,6 @@ async function startPriceWatcher() {
           }
         }
 
-        // Part 2: Cross-detection for ALL monitored intervals
         const intervals = perUserIntervals.get(user.id) || [settings.currentInterval || '5m'];
 
         for (const iv of intervals) {
@@ -1512,9 +1549,7 @@ async function startCryptoPriceWatcher() {
       for (const user of users) {
         const ticker = user.settings?.currentCryptoTicker;
         if (ticker) {
-          if (!tickersToWatch.has(ticker)) {
-            tickersToWatch.set(ticker, []);
-          }
+          if (!tickersToWatch.has(ticker)) tickersToWatch.set(ticker, []);
           tickersToWatch.get(ticker).push(user);
         }
       }
@@ -1528,7 +1563,6 @@ async function startCryptoPriceWatcher() {
 
         const allIntervals = new Set();
         for (const user of usersForTicker) {
-          // ✅ FIX: 仮想通貨は crypto_x_values を見て監視intervalを決める
           const intervals = getUserMonitoredIntervalsForCrypto(user.settings, ticker);
           const fallback = user.settings.currentInterval || '5m';
           const finalIntervals = intervals.length > 0 ? intervals : [fallback];
@@ -1548,17 +1582,20 @@ async function startCryptoPriceWatcher() {
         for (const user of usersForTicker) {
           const settings = user.settings || {};
           const realTimeState = settings.realTimeState || {};
-          realTimeState.cryptoCrossHistory = normalizeCrossHistoryToNested(realTimeState.cryptoCrossHistory || {}, settings.currentInterval || '5m');
+
+          // ✅ FIX: tickerごとに分離（migrate込み）
+          const { crossHistoryByInterval } = ensureCryptoPerTickerState(realTimeState, ticker, settings.currentInterval || '5m');
 
           let stateChanged = false;
 
           if (currentPrice != null) {
             const crypto_x_values = settings.crypto_x_values || {};
             const thresholdsForTicker = crypto_x_values[ticker] || {};
-            const cryptoCrossHistory = realTimeState.cryptoCrossHistory || {};
+            const cryptoCrossHistory = crossHistoryByInterval || {};
 
             for (const [iv, indicatorMap] of Object.entries(cryptoCrossHistory)) {
               if (!indicatorMap || typeof indicatorMap !== 'object') continue;
+
               const thresholdForInterval = Number(thresholdsForTicker[iv]);
               if (!Number.isFinite(thresholdForInterval) || thresholdForInterval <= 0) continue;
 
@@ -1578,10 +1615,10 @@ async function startCryptoPriceWatcher() {
                     thresholdForInterval
                   );
 
+                  // ✅ このtickerのこのintervalだけ消す
                   indicatorMap[indicatorName] = null;
                   stateChanged = true;
 
-                  // ✅ FIX: 仮想通貨は crypto_cross_history_cleared にする（ドル円UIを消さない）
                   const socketId = socketMap.get(user.id);
                   if (socketId) {
                     io.to(socketId).emit('crypto_cross_history_cleared', {
@@ -1596,7 +1633,6 @@ async function startCryptoPriceWatcher() {
             }
           }
 
-          // ✅ FIX: 仮想通貨は crypto_x_values を見て監視intervalを決める
           const userIntervals = getUserMonitoredIntervalsForCrypto(settings, ticker);
           const fallback = settings.currentInterval || '5m';
           const finalIntervals = userIntervals.length > 0 ? userIntervals : [fallback];
@@ -1632,7 +1668,7 @@ async function startCryptoPriceWatcher() {
     } finally {
       isTickRunning = false;
     }
-  }, 17000); // Offset slightly
+  }, 17000);
 }
 
 // --- Server Startup ---
@@ -1640,7 +1676,6 @@ async function startServer() {
   await configureNodemailer();
 
   console.log('Initializing database...');
-  // ✅ 外部キーの都合で users → emails → user_settings の順にしています
   await createUsersTable();
   await createEmailsTable();
   await createUserSettingsTable();
