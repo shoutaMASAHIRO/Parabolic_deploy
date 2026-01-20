@@ -7,1687 +7,1053 @@ try {
   console.warn('[WARN] dotenv not available (this is OK on production if env vars are set).');
 }
 
-const nodemailer = require('nodemailer');
 const express = require('express');
 const cors = require('cors');
-const { Pool } = require('pg');
-const { SSMClient, GetParametersCommand } = require('@aws-sdk/client-ssm');
-const bcrypt = require('bcrypt');
-const session = require('express-session');
+const path = require('path');
 const http = require('http');
+const session = require('express-session');
+const bcrypt = require('bcrypt');
+const nodemailer = require('nodemailer');
+const { Pool } = require('pg');
 const { Server } = require('socket.io');
 const { BollingerBands, EMA } = require('technicalindicators');
-
-let transporter;
-let gmailUserForFrom = null;
-
-const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true'; // ✅ http運用なら false のままでOK
-
-// ✅ 追加：サイトURL（環境変数があればそれを優先）
-const SITE_URL = process.env.SITE_URL || 'http://13.192.112.191:3000/';
-
-// ✅ 追加：メール末尾にサイト情報を付ける（text/html両対応）
-function appendSiteBlockToMail(text, html) {
-  const siteText = `\n\n【サイト】\n${SITE_URL}\n`;
-  const siteHtml = `<hr><p><strong>【サイト】</strong><br><a href="${SITE_URL}">${SITE_URL}</a></p>`;
-
-  return {
-    text: (text || '') + siteText,
-    html: (html || '') + siteHtml,
-  };
-}
-
-// ===== 表示名変換（DBキーは維持して、表示だけ変える） =====
-function getIndicatorDisplayName(indicatorName) {
-  const bbMap = {
-    upper2: '+2σ',
-    upper1: '+1σ',
-    middle: '0σ',
-    lower1: '-1σ',
-    lower2: '-2σ',
-  };
-  if (bbMap[indicatorName]) return bbMap[indicatorName];
-
-  // EMA はそのまま "EMA10" などに揃える（メール/通知用）
-  if (indicatorName?.startsWith('ema')) return `EMA${indicatorName.slice(3)}`;
-
-  // それ以外はフォールバック
-  return String(indicatorName ?? '');
-}
-
-// ===== crossHistory v2 helpers（interval別） =====
-function isCrossEventObject(v) {
-  return !!v && typeof v === 'object' && typeof v.price === 'number' && !Number.isNaN(v.price);
-}
-
-// crossHistory を nested に正規化：
-// v2: { "5m": { upper2:{...}, ema10:{...} }, "1h": {...} }
-// legacy(flat): { upper2:{...}, ema10:{...} }
-function normalizeCrossHistoryToNested(crossHistory, fallbackInterval) {
-  const nested = {};
-  if (!crossHistory || typeof crossHistory !== 'object') return nested;
-
-  const values = Object.values(crossHistory);
-
-  const looksNested = values.some(
-    (v) =>
-      v &&
-      typeof v === 'object' &&
-      !isCrossEventObject(v) &&
-      Object.values(v).some((x) => x === null || isCrossEventObject(x) || typeof x === 'number')
-  );
-
-  const looksFlat = values.some((v) => v === null || isCrossEventObject(v) || typeof v === 'number');
-
-  // nested
-  if (looksNested && !looksFlat) {
-    for (const [iv, map] of Object.entries(crossHistory)) {
-      if (!map || typeof map !== 'object') continue;
-      nested[iv] = {};
-      for (const [name, ev] of Object.entries(map)) {
-        if (ev === null) nested[iv][String(name)] = null;
-        else if (typeof ev === 'number' && !Number.isNaN(ev))
-          nested[iv][String(name)] = { price: ev, interval: String(iv), timestamp: null };
-        else if (isCrossEventObject(ev))
-          nested[iv][String(name)] = {
-            price: ev.price,
-            interval: ev.interval || String(iv),
-            timestamp: typeof ev.timestamp === 'string' ? ev.timestamp : null,
-          };
-      }
-    }
-    return nested;
-  }
-
-  // flat legacy
-  const fb = fallbackInterval || 'unknown';
-  for (const [name, ev] of Object.entries(crossHistory)) {
-    if (ev === null) {
-      if (!nested[fb]) nested[fb] = {};
-      nested[fb][String(name)] = null;
-      continue;
-    }
-
-    if (typeof ev === 'number' && !Number.isNaN(ev)) {
-      if (!nested[fb]) nested[fb] = {};
-      nested[fb][String(name)] = { price: ev, interval: fb, timestamp: null };
-      continue;
-    }
-
-    if (!isCrossEventObject(ev)) continue;
-
-    const iv = ev.interval || fb;
-    if (!nested[iv]) nested[iv] = {};
-    nested[iv][String(name)] = {
-      price: ev.price,
-      interval: iv,
-      timestamp: typeof ev.timestamp === 'string' ? ev.timestamp : null,
-    };
-  }
-  return nested;
-}
-
-/**
- * ✅ NEW: crypto crossHistory / dedup timestamps を「tickerごと」に分離
- * v3:
- *   realTimeState.cryptoCrossHistoryByTicker[ticker][interval][indicator] = {price,timestamp,interval} | null
- *   realTimeState.cryptoLastCrossTimestampsByTicker[ticker][interval][indicator] = tsIso
- *
- * 旧:
- *   realTimeState.cryptoCrossHistory (interval別のみ)
- *   realTimeState.cryptoLastCrossTimestamps (interval別のみ)
- * を見つけたら、指定tickerにmigrateする（破壊的移行：旧キーは削除）
- */
-function ensureCryptoPerTickerState(realTimeState, ticker, fallbackInterval) {
-  const t = String(ticker || 'UNKNOWN');
-  const fb = fallbackInterval || 'unknown';
-
-  if (!realTimeState || typeof realTimeState !== 'object') {
-    return { crossHistoryByInterval: {}, lastTsByInterval: {}, ticker: t };
-  }
-
-  // containers
-  if (!realTimeState.cryptoCrossHistoryByTicker || typeof realTimeState.cryptoCrossHistoryByTicker !== 'object') {
-    realTimeState.cryptoCrossHistoryByTicker = {};
-  }
-  if (!realTimeState.cryptoCrossHistoryByTicker[t] || typeof realTimeState.cryptoCrossHistoryByTicker[t] !== 'object') {
-    realTimeState.cryptoCrossHistoryByTicker[t] = {};
-  }
-
-  if (!realTimeState.cryptoLastCrossTimestampsByTicker || typeof realTimeState.cryptoLastCrossTimestampsByTicker !== 'object') {
-    realTimeState.cryptoLastCrossTimestampsByTicker = {};
-  }
-  if (
-    !realTimeState.cryptoLastCrossTimestampsByTicker[t] ||
-    typeof realTimeState.cryptoLastCrossTimestampsByTicker[t] !== 'object'
-  ) {
-    realTimeState.cryptoLastCrossTimestampsByTicker[t] = {};
-  }
-
-  // migrate legacy -> byTicker[t] (only if target is still empty)
-  const targetEmpty = Object.keys(realTimeState.cryptoCrossHistoryByTicker[t] || {}).length === 0;
-
-  if (targetEmpty && realTimeState.cryptoCrossHistory && typeof realTimeState.cryptoCrossHistory === 'object') {
-    realTimeState.cryptoCrossHistoryByTicker[t] = normalizeCrossHistoryToNested(realTimeState.cryptoCrossHistory, fb);
-    delete realTimeState.cryptoCrossHistory;
-  } else {
-    // ensure nested format for safety
-    realTimeState.cryptoCrossHistoryByTicker[t] = normalizeCrossHistoryToNested(realTimeState.cryptoCrossHistoryByTicker[t], fb);
-  }
-
-  const tsTargetEmpty = Object.keys(realTimeState.cryptoLastCrossTimestampsByTicker[t] || {}).length === 0;
-  if (tsTargetEmpty && realTimeState.cryptoLastCrossTimestamps && typeof realTimeState.cryptoLastCrossTimestamps === 'object') {
-    // legacy structure is already { interval: { indicator: tsIso } }
-    realTimeState.cryptoLastCrossTimestampsByTicker[t] = realTimeState.cryptoLastCrossTimestamps;
-    delete realTimeState.cryptoLastCrossTimestamps;
-  }
-
-  return {
-    crossHistoryByInterval: realTimeState.cryptoCrossHistoryByTicker[t],
-    lastTsByInterval: realTimeState.cryptoLastCrossTimestampsByTicker[t],
-    ticker: t,
-  };
-}
-
-// This function fetches credentials from AWS Parameter Store and configures Nodemailer
-async function configureNodemailer() {
-  try {
-    const ssmClient = new SSMClient({
-      region: process.env.AWS_REGION || 'ap-northeast-1',
-    });
-    const command = new GetParametersCommand({
-      Names: ['/parabolic/gmail/user', '/parabolic/gmail/pass'],
-      WithDecryption: true,
-    });
-
-    const { Parameters } = await ssmClient.send(command);
-
-    const gmailUser = Parameters.find((p) => p.Name === '/parabolic/gmail/user')?.Value;
-    const gmailPass = Parameters.find((p) => p.Name === '/parabolic/gmail/pass')?.Value;
-
-    if (!gmailUser || !gmailPass) {
-      throw new Error('Gmail credentials not found in Parameter Store.');
-    }
-
-    gmailUserForFrom = gmailUser;
-
-    transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: gmailUser,
-        pass: gmailPass,
-      },
-    });
-
-    console.log('Nodemailer configured successfully with credentials from Parameter Store.');
-  } catch (error) {
-    console.error('Failed to configure Nodemailer from Parameter Store:', error);
-  }
-}
+const { SSMClient, GetParametersCommand } = require('@aws-sdk/client-ssm');
 
 const app = express();
-const port = 3000;
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : true,
-    credentials: true,
-    methods: ['GET', 'POST'],
-  },
-});
 
-// --- Database Setup ---
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-});
+// =====================
+// Config / Env
+// =====================
+const PORT = process.env.PORT || 3000;
 
-async function createUsersTable() {
-  const client = await pool.connect();
-  try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        username VARCHAR(255) UNIQUE NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    console.log('"users" table checked/created successfully.');
-  } catch (err) {
-    console.error('Error creating "users" table:', err);
-  } finally {
-    client.release();
-  }
-}
+const COOKIE_SECURE = process.env.COOKIE_SECURE === 'true'; // https運用なら true
+const SESSION_SECRET = process.env.SESSION_SECRET || 'dev_secret_change_me';
 
-async function createEmailsTable() {
-  const client = await pool.connect();
-  try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS emails (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    console.log('"emails" table checked/created successfully.');
-  } catch (err) {
-    console.error('Error creating "emails" table:', err);
-  } finally {
-    client.release();
-  }
-}
+// フロント別オリジンの場合は CORS_ORIGIN="https://example.com,https://www.example.com"
+const CORS_ORIGIN = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean)
+  : null;
 
-async function createUserSettingsTable() {
-  const client = await pool.connect();
-  try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS user_settings (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        settings JSONB NOT NULL DEFAULT '{}',
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    console.log('"user_settings" table checked/created successfully.');
-  } catch (err) {
-    console.error('Error creating "user_settings" table:', err);
-  } finally {
-    client.release();
-  }
-}
+const corsOptions = {
+  origin: CORS_ORIGIN || true,
+  credentials: true,
+};
 
-// --- Middleware ---
-app.use(cors());
-app.use(express.json());
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '1mb' }));
+// ✅ フォーム送信でも req.body が入るように（400対策）
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// behind reverse proxy (nginx) の場合も考慮
-app.set('trust proxy', 1);
+// ✅ 静的配信（注意：__dirname 公開はセキュリティ上リスクがある。可能なら public/ や dist/ のみに）
+app.use(express.static(__dirname));
 
-// --- Session Middleware for Authentication ---
 const sessionMiddleware = session({
-  secret: process.env.SESSION_SECRET || 'your_secret_key',
+  name: 'connect.sid',
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
-    sameSite: 'lax',
-    secure: COOKIE_SECURE,
     httpOnly: true,
-    maxAge: 1000 * 60 * 60 * 24 * 7,
+    secure: COOKIE_SECURE,
+    sameSite: COOKIE_SECURE ? 'none' : 'lax',
+    maxAge: 1000 * 60 * 60 * 24 * 14, // 14 days
   },
 });
+
 app.use(sessionMiddleware);
 
-// Share session with socket.io
+// =====================
+// Socket.IO
+// =====================
+const io = new Server(server, {
+  cors: { ...corsOptions, methods: ['GET', 'POST'] },
+});
+
 io.use((socket, next) => {
+  // express-session を socket にも適用
   sessionMiddleware(socket.request, {}, next);
 });
 
-app.use(express.static('dist'));
-app.use(express.static(__dirname));
+function userRoom(userId) {
+  return `user:${userId}`;
+}
 
-// --- Real-time Price Watcher for USD/JPY ---
 io.on('connection', (socket) => {
-  const sess = socket.request.session;
-  if (sess && sess.userId) {
-    socket.userId = sess.userId;
-    console.log(`User connected: ${socket.id}, userId: ${socket.userId}`);
-  } else {
-    console.log(`Anonymous user connected: ${socket.id}`);
-  }
-
-  // ✅ ログイン直後など、handshake時に userId が無い socket に後から紐付ける
+  // クライアントが connect しただけでは room に入れない（auth_sync を待つ）
   socket.on('auth_sync', () => {
-    const s = socket.request.session;
-    if (!s || typeof s.reload !== 'function') return;
-    s.reload((err) => {
-      if (err) return;
-      if (s.userId) {
-        socket.userId = s.userId;
-        console.log(`Socket auth synced: ${socket.id}, userId: ${socket.userId}`);
-      }
-    });
+    const sess = socket.request.session;
+    const uid = sess?.userId;
+    if (uid) {
+      socket.join(userRoom(uid));
+    }
   });
 
-  socket.on('disconnect', () => {
-    console.log(`user disconnected: ${socket.id}`);
-  });
+  socket.on('disconnect', () => {});
 });
 
-// A simple caching mechanism
-const cache = {};
-const CACHE_TTL = 30 * 1000; // 30 seconds
+// =====================
+// DB
+// =====================
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  // SSL が必要な環境では env に合わせて調整
+  ssl: process.env.PGSSLMODE === 'require' ? { rejectUnauthorized: false } : undefined,
+});
 
-// watcher/endpoint 共通の interval 許可リスト
-const VALID_INTERVALS = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '4h', '8h', '1d', '5d', '1wk', '1mo', '3mo'];
-function isValidInterval(iv) {
-  return VALID_INTERVALS.includes(iv);
+async function ensureTables() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS emails (
+      id SERIAL PRIMARY KEY,
+      user_id INT REFERENCES users(id) ON DELETE CASCADE,
+      email TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id, email)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      settings JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
 }
 
-function getDaysToFetchForInterval(interval) {
-  switch (interval) {
-    case '1m':
-      return 7;
-    case '2m':
-    case '5m':
-    case '15m':
-    case '30m':
-      return 30;
-    case '60m':
-    case '1h':
-      return 60;
-    case '4h':
-      return 120;
-    case '8h':
-      return 180;
-    case '1d':
-      return 365;
-    case '5d':
-    case '1wk':
-      return 365 * 5;
-    case '1mo':
-      return 365 * 30;
-    case '3mo':
-      return 365 * 90;
-    default:
-      return 365;
-  }
+function requireAuth(req, res, next) {
+  if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated.' });
+  next();
 }
 
-// ユーザーごとの「監視対象 interval」を決定（ドル円用）
-function getUserMonitoredIntervals(settings) {
-  const out = new Set();
-  const currentInterval = settings?.currentInterval;
-  if (typeof currentInterval === 'string' && currentInterval) out.add(currentInterval);
+// =====================
+// Gmail / Email (SSM or ENV)
+// =====================
+let transporter = null;
+let gmailUserForFrom = null;
 
-  const x_values = settings?.x_values || {};
-  if (x_values && typeof x_values === 'object') {
-    for (const [iv, x] of Object.entries(x_values)) {
-      const n = Number(x);
-      if (Number.isFinite(n) && n > 0 && typeof iv === 'string' && iv) out.add(iv);
+async function initMailerIfNeeded() {
+  if (transporter) return;
+
+  // SSM を使う場合
+  const region = process.env.AWS_REGION;
+  const ssmUserParam = process.env.SSM_GMAIL_USER_PARAM;
+  const ssmPassParam = process.env.SSM_GMAIL_PASS_PARAM;
+
+  let gmailUser = process.env.GMAIL_USER || null;
+  let gmailPass = process.env.GMAIL_APP_PASSWORD || null;
+
+  if (region && ssmUserParam && ssmPassParam) {
+    try {
+      const client = new SSMClient({ region });
+      const cmd = new GetParametersCommand({
+        Names: [ssmUserParam, ssmPassParam],
+        WithDecryption: true,
+      });
+      const out = await client.send(cmd);
+
+      const params = new Map();
+      for (const p of out.Parameters || []) params.set(p.Name, p.Value);
+
+      gmailUser = params.get(ssmUserParam) || gmailUser;
+      gmailPass = params.get(ssmPassParam) || gmailPass;
+    } catch (e) {
+      console.warn('[WARN] Failed to load Gmail creds from SSM. Falling back to env if present.');
     }
   }
 
-  return [...out].filter((iv) => isValidInterval(iv));
-}
-
-// ✅ 追加：仮想通貨の「監視対象 interval」を決定（crypto_x_values を見る）
-function getUserMonitoredIntervalsForCrypto(settings, ticker) {
-  const out = new Set();
-  const currentInterval = settings?.currentInterval;
-  if (typeof currentInterval === 'string' && currentInterval) out.add(currentInterval);
-
-  const crypto_x_values = settings?.crypto_x_values || {};
-  const perTicker = crypto_x_values && typeof crypto_x_values === 'object' ? crypto_x_values[ticker] : null;
-
-  if (perTicker && typeof perTicker === 'object') {
-    for (const [iv, x] of Object.entries(perTicker)) {
-      const n = Number(x);
-      if (Number.isFinite(n) && n > 0 && typeof iv === 'string' && iv) out.add(iv);
-    }
+  if (!gmailUser || !gmailPass) {
+    console.warn('[WARN] Gmail credentials are not configured. Email sending will be disabled.');
+    return;
   }
 
-  return [...out].filter((iv) => isValidInterval(iv));
+  gmailUserForFrom = gmailUser;
+
+  transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: gmailUser, pass: gmailPass },
+  });
 }
 
-// ===== Yahoo Chart API (fetch) helper =====
-async function fetchYahooChartQuotes(symbol, interval, period1Date, period2Date) {
-  const p1 = Math.floor(period1Date.getTime() / 1000);
-  const p2 = Math.floor(period2Date.getTime() / 1000);
+async function sendMail({ to, subject, text }) {
+  await initMailerIfNeeded();
+  if (!transporter) return;
 
-  const url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
-    `?interval=${encodeURIComponent(interval)}&period1=${p1}&period2=${p2}`;
+  await transporter.sendMail({
+    from: gmailUserForFrom,
+    to,
+    subject,
+    text,
+  });
+}
+
+// =====================
+// Yahoo Finance helpers
+// =====================
+function pickRangeByInterval(interval) {
+  // Yahoo は interval によって取得できる期間が違うのでざっくり最適化
+  if (interval.endsWith('m')) return '5d';
+  if (interval.endsWith('h')) return '60d';
+  if (interval === '1d') return '1y';
+  if (interval === '1wk') return '5y';
+  return '1y';
+}
+
+function normalizeInterval(interval) {
+  return String(interval || '1d');
+}
+
+async function fetchYahooChart(ticker, interval) {
+  const iv = normalizeInterval(interval);
+  const range = pickRangeByInterval(iv);
+
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+    ticker
+  )}?interval=${encodeURIComponent(iv)}&range=${encodeURIComponent(range)}`;
 
   const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  const text = await r.text();
+  if (!r.ok) throw new Error(`Yahoo chart fetch failed: HTTP ${r.status}`);
+  const j = await r.json();
 
-  if (!r.ok) {
-    throw new Error(`Yahoo chart HTTP ${r.status}: ${text.slice(0, 200)}`);
+  const result = j?.chart?.result?.[0];
+  if (!result) throw new Error('Yahoo chart: empty result');
+
+  const timestamps = result.timestamp || [];
+  const quote = result.indicators?.quote?.[0] || {};
+  const opens = quote.open || [];
+  const highs = quote.high || [];
+  const lows = quote.low || [];
+  const closes = quote.close || [];
+
+  const candles = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    const t = timestamps[i];
+    const o = opens[i];
+    const h = highs[i];
+    const l = lows[i];
+    const c = closes[i];
+    if (t == null || o == null || h == null || l == null || c == null) continue;
+    candles.push({ time: t, open: o, high: h, low: l, close: c });
   }
 
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new Error(`Yahoo chart JSON parse failed: ${text.slice(0, 200)}`);
-  }
+  candles.sort((a, b) => a.time - b.time);
+  return candles;
+}
 
-  const result = json?.chart?.result?.[0];
-  if (!result) {
-    throw new Error(`Yahoo chart missing result: ${text.slice(0, 200)}`);
-  }
-
-  const ts = result.timestamp || [];
-  const q = result.indicators?.quote?.[0] || {};
-  const adj = result.indicators?.adjclose?.[0]?.adjclose || null;
+function aggregateCandles(candles, targetInterval) {
+  if (!candles || candles.length === 0) return [];
+  const hours = parseInt(String(targetInterval).replace('h', ''), 10);
+  if (!Number.isFinite(hours) || hours <= 1) return candles;
 
   const out = [];
-  for (let i = 0; i < ts.length; i++) {
-    const close = q.close?.[i];
-    if (close == null) continue;
+  let cur = null;
+  let curStart = null;
 
-    out.push({
-      date: new Date(ts[i] * 1000),
-      open: q.open?.[i],
-      high: q.high?.[i],
-      low: q.low?.[i],
-      close: close,
-      volume: q.volume?.[i],
-      adjclose: adj?.[i] ?? close,
-    });
+  for (const c of candles) {
+    const d = new Date(c.time * 1000);
+    const hour = d.getUTCHours();
+    const startHour = Math.floor(hour / hours) * hours;
+
+    const startDate = new Date(d);
+    startDate.setUTCHours(startHour, 0, 0, 0);
+    const start = Math.floor(startDate.getTime() / 1000);
+
+    if (!cur || start !== curStart) {
+      if (cur) out.push(cur);
+      cur = { time: start, open: c.open, high: c.high, low: c.low, close: c.close };
+      curStart = start;
+    } else {
+      cur.high = Math.max(cur.high, c.high);
+      cur.low = Math.min(cur.low, c.low);
+      cur.close = c.close;
+    }
   }
-
+  if (cur) out.push(cur);
   return out;
 }
 
-// ===== FIX: Yahooは4h/8h interval非対応なので、1hを取得して4h/8hに集約する =====
-function aggregateQuotesToHours(quotes, intervalInHours) {
-  if (!Array.isArray(quotes) || quotes.length === 0) return [];
+// 簡易キャッシュ（同一ticker/intervalを短時間に多重取得しない）
+const CANDLE_CACHE = new Map(); // key => { ts, candles }
+const CACHE_TTL_MS = 15_000;
 
-  const aggregated = [];
-  let current = null;
-  let periodStartMs = null;
-
-  for (const q of quotes) {
-    const t = new Date(q.date);
-    const hour = t.getUTCHours();
-    const startHour = Math.floor(hour / intervalInHours) * intervalInHours;
-
-    const start = new Date(t);
-    start.setUTCHours(startHour, 0, 0, 0);
-    const startMs = start.getTime();
-
-    if (current === null || startMs !== periodStartMs) {
-      if (current !== null) aggregated.push(current);
-
-      current = {
-        date: new Date(startMs),
-        open: q.open,
-        high: q.high,
-        low: q.low,
-        close: q.close,
-        volume: q.volume ?? null,
-        adjclose: q.adjclose ?? q.close,
-      };
-      periodStartMs = startMs;
-    } else {
-      current.high = Math.max(current.high, q.high);
-      current.low = Math.min(current.low, q.low);
-      current.close = q.close;
-
-      if (current.volume != null || q.volume != null) {
-        current.volume = (current.volume ?? 0) + (q.volume ?? 0);
-      }
-      current.adjclose = q.adjclose ?? q.close;
-    }
-  }
-
-  if (current !== null) aggregated.push(current);
-  return aggregated;
-}
-
-/**
- * ✅ watcher用：指定ticker/intervalのローソク足を取得（4h/8hは集約）
- * ✅ ticker/intervalごとにキャッシュ（CACHE_TTL）して無駄なYahoo呼び出しを減らす
- */
-async function fetchQuotesForWatcher(ticker, interval) {
-  const iv = String(interval || '');
-  if (!isValidInterval(iv)) return null;
-
-  const cacheKey = `watcher-${ticker}-${iv}`;
+async function getCandlesWithCache(ticker, interval) {
+  const key = `${ticker}|${interval}`;
   const now = Date.now();
-  if (cache[cacheKey] && now - cache[cacheKey].timestamp < CACHE_TTL) {
-    return cache[cacheKey].data;
+  const hit = CANDLE_CACHE.get(key);
+  if (hit && now - hit.ts < CACHE_TTL_MS) return hit.candles;
+
+  let candles;
+  if (interval === '4h' || interval === '8h') {
+    const base = await fetchYahooChart(ticker, '1h');
+    candles = aggregateCandles(base, interval);
+  } else {
+    candles = await fetchYahooChart(ticker, interval);
   }
 
-  const daysToFetch = getDaysToFetchForInterval(iv);
-  const period2 = new Date();
-  const period1 = new Date(period2.getTime() - daysToFetch * 24 * 60 * 60 * 1000);
-
-  let fetchInterval = iv;
-  let aggregateHours = null;
-
-  if (iv === '4h') {
-    fetchInterval = '1h';
-    aggregateHours = 4;
-  } else if (iv === '8h') {
-    fetchInterval = '1h';
-    aggregateHours = 8;
-  }
-
-  const rawQuotes = await fetchYahooChartQuotes(ticker, fetchInterval, period1, period2);
-  const quotes = aggregateHours ? aggregateQuotesToHours(rawQuotes, aggregateHours) : rawQuotes;
-
-  cache[cacheKey] = { timestamp: Date.now(), data: quotes };
-  return quotes;
+  CANDLE_CACHE.set(key, { ts: now, candles });
+  return candles;
 }
 
-/**
- * ✅ 追加：現在値を「quote → ダメなら chart」で取得
- */
-async function fetchCurrentPrice(ticker) {
-  // ① quote（速いが弾かれやすい）
-  try {
-    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(ticker)}`;
-    const resp = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-    });
-    const text = await resp.text();
+// =====================
+// Real-time State helpers
+// =====================
+function nowIso() {
+  return new Date().toISOString();
+}
 
-    if (!resp.ok) {
-      console.error(`Yahoo quote HTTP ${resp.status} for ${ticker}: ${text.slice(0, 200)}`);
-    } else {
-      const json = JSON.parse(text);
-      const p = json?.quoteResponse?.result?.[0]?.regularMarketPrice;
-      if (typeof p === 'number') return p;
-      console.error(`Yahoo quote OK but price missing for ${ticker}: ${text.slice(0, 200)}`);
+function normalizeXValue(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  if (n <= 0) return null;
+  return n;
+}
+
+function ensureObj(o) {
+  return o && typeof o === 'object' ? o : {};
+}
+
+function ensureRealTimeState(settings) {
+  const s = ensureObj(settings);
+  if (!s.realTimeState || typeof s.realTimeState !== 'object') s.realTimeState = {};
+  if (!s.realTimeState.crossHistory || typeof s.realTimeState.crossHistory !== 'object') {
+    s.realTimeState.crossHistory = {};
+  }
+  if (
+    !s.realTimeState.cryptoCrossHistoryByTicker ||
+    typeof s.realTimeState.cryptoCrossHistoryByTicker !== 'object'
+  ) {
+    s.realTimeState.cryptoCrossHistoryByTicker = {};
+  }
+  return s.realTimeState;
+}
+
+function ensureIntervalMap(root, interval) {
+  const iv = String(interval || 'unknown');
+  if (!root[iv] || typeof root[iv] !== 'object') root[iv] = {};
+  return root[iv];
+}
+
+// --- USDJPY crossHistory clear helpers ---
+function clearBbCrossHistory(realTimeState) {
+  const ch = realTimeState?.crossHistory;
+  if (!ch || typeof ch !== 'object') return;
+  const bands = ['upper2', 'upper1', 'middle', 'lower1', 'lower2'];
+  for (const [iv, map] of Object.entries(ch)) {
+    if (!map || typeof map !== 'object') continue;
+    for (const k of bands) map[k] = null;
+  }
+}
+
+function clearEmaCrossHistory(realTimeState) {
+  const ch = realTimeState?.crossHistory;
+  if (!ch || typeof ch !== 'object') return;
+  const emas = ['ema10', 'ema25', 'ema50'];
+  for (const [iv, map] of Object.entries(ch)) {
+    if (!map || typeof map !== 'object') continue;
+    for (const k of emas) map[k] = null;
+  }
+}
+
+// --- crypto crossHistory helpers ---
+function ensureCryptoPerTickerState(realTimeState) {
+  // cryptoCrossHistoryByTicker[ticker][interval][indicator]
+  const root = realTimeState.cryptoCrossHistoryByTicker;
+  if (!root || typeof root !== 'object') realTimeState.cryptoCrossHistoryByTicker = {};
+  return realTimeState.cryptoCrossHistoryByTicker;
+}
+
+function clearCryptoBbHistory(realTimeState) {
+  const root = realTimeState?.cryptoCrossHistoryByTicker;
+  if (!root || typeof root !== 'object') return;
+  const bands = ['upper2', 'upper1', 'middle', 'lower1', 'lower2'];
+
+  for (const ticker of Object.keys(root)) {
+    const byIv = root[ticker];
+    if (!byIv || typeof byIv !== 'object') continue;
+    for (const iv of Object.keys(byIv)) {
+      const map = byIv[iv];
+      if (!map || typeof map !== 'object') continue;
+      for (const k of bands) {
+        if (k in map) map[k] = null;
+      }
     }
-  } catch (e) {
-    console.error(`Yahoo quote fetch error for ${ticker}:`, e);
   }
-
-  // ② fallback：chart の最新 close
-  try {
-    const period2 = new Date();
-    const period1 = new Date(period2.getTime() - 2 * 24 * 60 * 60 * 1000);
-    const quotes = await fetchYahooChartQuotes(ticker, '1m', period1, period2);
-    const last = quotes[quotes.length - 1];
-    if (last?.close != null) return last.close;
-    console.error(`Yahoo chart fallback OK but last.close missing for ${ticker}`);
-  } catch (e) {
-    console.error(`Yahoo chart fallback fetch error for ${ticker}:`, e);
-  }
-
-  return null;
 }
 
-// --- API Endpoints for Authentication ---
+function clearCryptoEmaHistory(realTimeState) {
+  const root = realTimeState?.cryptoCrossHistoryByTicker;
+  if (!root || typeof root !== 'object') return;
+
+  for (const ticker of Object.keys(root)) {
+    const byIv = root[ticker];
+    if (!byIv || typeof byIv !== 'object') continue;
+    for (const iv of Object.keys(byIv)) {
+      const map = byIv[iv];
+      if (!map || typeof map !== 'object') continue;
+
+      for (const k of Object.keys(map)) {
+        if (String(k).startsWith('ema')) map[k] = null;
+      }
+    }
+  }
+}
+
+// =====================
+// Settings DB helpers
+// =====================
+async function getUserSettings(userId) {
+  const r = await pool.query('SELECT settings FROM user_settings WHERE user_id = $1', [userId]);
+  return r.rows[0]?.settings || null;
+}
+
+async function upsertUserSettings(userId, settings) {
+  await pool.query(
+    `
+    INSERT INTO user_settings (user_id, settings, updated_at)
+    VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
+    ON CONFLICT (user_id) DO UPDATE
+      SET settings = EXCLUDED.settings,
+          updated_at = CURRENT_TIMESTAMP
+    `,
+    [userId, JSON.stringify(settings || {})]
+  );
+}
+
+// =====================
+// API: Auth
+// =====================
 app.post('/api/auth/register', async (req, res) => {
-  const { email, username, password } = req.body;
-
-  if (!email || !username || !password) {
-    return res.status(400).json({ error: 'Email, username, and password are required.' });
-  }
-  if (!/^\S+@\S+\.\S+$/.test(email)) {
-    return res.status(400).json({ error: 'Please provide a valid email address.' });
-  }
-
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await pool.query(
-      'INSERT INTO users (email, username, password_hash) VALUES ($1, $2, $3) RETURNING id, email, username',
-      [email, username, hashedPassword]
+    const { email, username, password } = req.body || {};
+    if (!email || !username || !password) return res.status(400).json({ error: 'Missing fields.' });
+
+    const hash = await bcrypt.hash(password, 10);
+    const r = await pool.query(
+      `INSERT INTO users (email, username, password_hash, updated_at)
+       VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+       RETURNING id, email, username`,
+      [email, username, hash]
     );
-    const user = result.rows[0];
-    req.session.userId = user.id;
-    res.status(201).json({
-      message: 'Registration successful!',
-      user: { id: user.id, email: user.email, username: user.username },
-    });
-  } catch (error) {
-    console.error('Registration error:', error);
-    if (error.code === '23505') {
-      if (error.detail?.includes('email')) return res.status(409).json({ error: 'Email already in use.' });
-      if (error.detail?.includes('username')) return res.status(409).json({ error: 'Username already taken.' });
-    }
-    res.status(500).json({ error: 'An internal server error occurred during registration.' });
+
+    req.session.userId = r.rows[0].id;
+    return res.json({ user: r.rows[0] });
+  } catch (e) {
+    const msg = String(e?.message || '');
+    if (msg.includes('duplicate key')) return res.status(409).json({ error: 'Email or username already exists.' });
+    console.error(e);
+    return res.status(500).json({ error: 'Server error.' });
   }
 });
 
 app.post('/api/auth/login', async (req, res) => {
-  const { emailOrUsername, password } = req.body;
-
-  if (!emailOrUsername || !password) {
-    return res.status(400).json({ error: 'Email/username and password are required.' });
-  }
-
   try {
-    const result = await pool.query('SELECT id, email, username, password_hash FROM users WHERE email = $1 OR username = $1', [
-      emailOrUsername,
-    ]);
-    const user = result.rows[0];
+    const body = req.body || {};
 
-    if (!user) return res.status(401).json({ error: 'Invalid credentials.' });
+    // ✅ 受け取りキーのズレ吸収（400対策）
+    const identifier =
+      body.identifier ||
+      body.emailOrUsername ||
+      body.email_or_username ||
+      body.loginId ||
+      body.login_id ||
+      body.email ||
+      body.username;
 
-    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
-    if (!isPasswordValid) return res.status(401).json({ error: 'Invalid credentials.' });
+    const password = body.password;
 
-    req.session.userId = user.id;
-    res.status(200).json({
-      message: 'Login successful!',
-      user: { id: user.id, email: user.email, username: user.username },
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: 'An internal server error occurred during login.' });
+    if (!identifier || !password) return res.status(400).json({ error: 'Missing fields.' });
+
+    const r = await pool.query(
+      `SELECT id, email, username, password_hash FROM users WHERE email = $1 OR username = $1 LIMIT 1`,
+      [identifier]
+    );
+    const u = r.rows[0];
+    if (!u) return res.status(401).json({ error: 'Invalid credentials.' });
+
+    const ok = await bcrypt.compare(password, u.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Invalid credentials.' });
+
+    req.session.userId = u.id;
+    return res.json({ user: { id: u.id, email: u.email, username: u.username } });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Server error.' });
   }
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      console.error('Logout error:', err);
-      return res.status(500).json({ error: 'Failed to log out.' });
-    }
-    res.clearCookie('connect.sid');
-    res.status(200).json({ message: 'Logout successful!' });
+  req.session.destroy(() => {
+    res.json({ message: 'Logged out.' });
   });
 });
 
 app.get('/api/auth/me', async (req, res) => {
-  if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated.' });
-
   try {
-    const result = await pool.query('SELECT id, email, username FROM users WHERE id = $1', [req.session.userId]);
-    const user = result.rows[0];
+    const uid = req.session?.userId;
+    if (!uid) return res.status(401).json({ error: 'Not authenticated.' });
 
-    if (!user) {
-      req.session.destroy();
-      return res.status(401).json({ error: 'User not found or session invalid.' });
+    const r = await pool.query('SELECT id, email, username FROM users WHERE id = $1', [uid]);
+    const u = r.rows[0];
+    if (!u) return res.status(401).json({ error: 'Not authenticated.' });
+
+    return res.json({ user: u });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+// =====================
+// API: User Settings
+// =====================
+app.get('/api/user/settings', requireAuth, async (req, res) => {
+  try {
+    const uid = req.session.userId;
+    const settings = (await getUserSettings(uid)) || {};
+    // client は {settings: {...}, ...raw} をマージして読むので両方返す
+    return res.json({ settings, ...settings });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to load settings.' });
+  }
+});
+
+app.post('/api/user/settings', requireAuth, async (req, res) => {
+  try {
+    const uid = req.session.userId;
+    const incoming = ensureObj(req.body);
+
+    const existing = (await getUserSettings(uid)) || {};
+    const merged = { ...existing, ...incoming };
+
+    // ✅ realTimeState は既存を引き継ぐ（incoming に含まれても安全にマージ）
+    const rtExisting = ensureRealTimeState(existing);
+    const rtMerged = ensureRealTimeState(merged);
+
+    rtMerged.crossHistory = rtMerged.crossHistory || rtExisting.crossHistory || {};
+    rtMerged.cryptoCrossHistoryByTicker =
+      rtMerged.cryptoCrossHistoryByTicker || rtExisting.cryptoCrossHistoryByTicker || {};
+
+    // ✅ 非表示＝判定しない + OFFにした瞬間に該当履歴だけ消す（事故防止）
+    const bbEnabled = merged.areBollingerBandsVisible !== false;
+    const emaEnabled = merged.areEmaVisible !== false;
+
+    if (!bbEnabled) {
+      clearBbCrossHistory(rtMerged);
+      clearCryptoBbHistory(rtMerged);
     }
-    res.status(200).json({ user: { id: user.id, email: user.email, username: user.username } });
-  } catch (error) {
-    console.error('Fetch user error:', error);
-    res.status(500).json({ error: 'An internal server error occurred.' });
-  }
-});
+    if (!emaEnabled) {
+      clearEmaCrossHistory(rtMerged);
+      clearCryptoEmaHistory(rtMerged);
+    }
 
-// API to get user settings
-app.get('/api/user/settings', async (req, res) => {
-  if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated.' });
+    merged.realTimeState = rtMerged;
 
-  try {
-    const result = await pool.query('SELECT settings FROM user_settings WHERE user_id = $1', [req.session.userId]);
-    if (result.rows.length > 0) return res.status(200).json(result.rows[0].settings);
-    return res.status(200).json({});
-  } catch (error) {
-    console.error('Fetch user settings error:', error);
-    res.status(500).json({ error: 'An internal server error occurred while fetching settings.' });
-  }
-});
+    await upsertUserSettings(uid, merged);
 
-// ✅ 修正：ユーザー設定保存は「JSONBマージ」ではなく、フラット化して保存
-app.post('/api/user/settings', async (req, res) => {
-  if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated.' });
-
-  const incoming =
-    req.body && req.body.settings && typeof req.body.settings === 'object' ? req.body.settings : req.body;
-
-  try {
-    const currentRes = await pool.query('SELECT settings FROM user_settings WHERE user_id = $1', [req.session.userId]);
-    const current = currentRes.rows?.[0]?.settings || {};
-
-    const cleanCurrent = { ...(current.settings || {}), ...current };
-    delete cleanCurrent.settings;
-
-    const merged = {
-      ...cleanCurrent,
-      ...incoming,
-    };
-
-    const result = await pool.query(
-      `
-      INSERT INTO user_settings (user_id, settings)
-      VALUES ($1, $2)
-      ON CONFLICT (user_id)
-      DO UPDATE SET
-        settings = $2,
-        updated_at = CURRENT_TIMESTAMP
-      RETURNING settings
-      `,
-      [req.session.userId, merged]
-    );
-
-    res.status(200).json(result.rows[0].settings);
-  } catch (error) {
-    console.error('Save user settings error:', error);
-    res.status(500).json({ error: 'An internal server error occurred while saving settings.' });
-  }
-});
-
-// ✅ cross_history clear（USDJPY）
-app.post('/api/user/cross_history/clear', async (req, res) => {
-  if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated.' });
-
-  const { indicatorNames, interval } = req.body;
-  if (!Array.isArray(indicatorNames) || indicatorNames.length === 0) {
-    return res.status(400).json({ error: 'indicatorNames must be a non-empty array.' });
-  }
-
-  try {
-    const r = await pool.query('SELECT settings FROM user_settings WHERE user_id = $1', [req.session.userId]);
-    const settings = r.rows?.[0]?.settings || {};
-
-    const realTimeState = settings.realTimeState || {};
-    const nested = normalizeCrossHistoryToNested(realTimeState.crossHistory || {}, settings.currentInterval || '5m');
-
-    const lastCrossTimestamps =
-      realTimeState.lastCrossTimestamps && typeof realTimeState.lastCrossTimestamps === 'object'
-        ? realTimeState.lastCrossTimestamps
-        : {};
-
-    if (interval) {
-      const iv = String(interval);
-      if (!nested[iv]) nested[iv] = {};
-      for (const name of indicatorNames) nested[iv][String(name)] = null;
-
-      if (lastCrossTimestamps[iv] && typeof lastCrossTimestamps[iv] === 'object') {
-        for (const name of indicatorNames) delete lastCrossTimestamps[iv][String(name)];
-        if (Object.keys(lastCrossTimestamps[iv]).length === 0) delete lastCrossTimestamps[iv];
+    // ✅ クライアントUIも即反映できるようにクリアイベントを投げる（USDJPY）
+    if (!bbEnabled) {
+      const bands = ['upper2', 'upper1', 'middle', 'lower1', 'lower2'];
+      for (const iv of Object.keys(rtMerged.crossHistory || {})) {
+        for (const b of bands) {
+          io.to(userRoom(uid)).emit('cross_history_cleared', { indicatorName: b, interval: iv });
+        }
       }
-    } else {
-      const keys = Object.keys(nested);
-      if (keys.length === 0) nested[settings.currentInterval || '5m'] = {};
-
-      for (const iv of Object.keys(nested)) {
-        for (const name of indicatorNames) nested[iv][String(name)] = null;
-
-        if (lastCrossTimestamps[iv] && typeof lastCrossTimestamps[iv] === 'object') {
-          for (const name of indicatorNames) delete lastCrossTimestamps[iv][String(name)];
-          if (Object.keys(lastCrossTimestamps[iv]).length === 0) delete lastCrossTimestamps[iv];
+    }
+    if (!emaEnabled) {
+      const emas = ['ema10', 'ema25', 'ema50'];
+      for (const iv of Object.keys(rtMerged.crossHistory || {})) {
+        for (const e of emas) {
+          io.to(userRoom(uid)).emit('cross_history_cleared', { indicatorName: e, interval: iv });
         }
       }
     }
 
-    const newSettings = {
-      ...settings,
-      realTimeState: {
-        ...realTimeState,
-        crossHistory: nested,
-        lastCrossTimestamps,
-      },
-    };
+    // crypto 用（現状UIはログのみ）
+    if (!bbEnabled) io.to(userRoom(uid)).emit('crypto_cross_history_cleared', { cleared: true, type: 'bb' });
+    if (!emaEnabled) io.to(userRoom(uid)).emit('crypto_cross_history_cleared', { cleared: true, type: 'ema' });
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to save settings.' });
+  }
+});
+
+// =====================
+// API: Email subscriptions (user-scoped)
+// =====================
+app.post('/api/subscribe', requireAuth, async (req, res) => {
+  try {
+    const uid = req.session.userId;
+    const { email } = req.body || {};
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Invalid email.' });
 
     await pool.query(
-      `
-      INSERT INTO user_settings (user_id, settings)
-      VALUES ($1, $2)
-      ON CONFLICT (user_id)
-      DO UPDATE SET settings = $2, updated_at = CURRENT_TIMESTAMP
-      `,
-      [req.session.userId, newSettings]
+      `INSERT INTO emails (user_id, email) VALUES ($1, $2)
+       ON CONFLICT (user_id, email) DO NOTHING`,
+      [uid, email]
     );
 
-    return res.status(200).json({ message: 'crossHistory cleared.', crossHistory: nested });
+    return res.json({ message: '登録しました。' });
   } catch (e) {
-    console.error('Clear cross_history error:', e);
-    return res.status(500).json({ error: 'An internal server error occurred while clearing cross history.' });
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to subscribe.' });
   }
 });
 
-// Subscribe email
-app.post('/api/subscribe', async (req, res) => {
-  const { email } = req.body;
-
-  if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
-    return res.status(400).json({ error: 'Please provide a valid email address.' });
-  }
-
+app.get('/api/emails', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('INSERT INTO emails (email) VALUES ($1) ON CONFLICT (email) DO NOTHING RETURNING *', [
-      email,
-    ]);
-
-    if (result.rows.length > 0) return res.status(201).json({ message: 'Thank you for subscribing!', email: result.rows[0] });
-    return res.status(200).json({ message: 'You are already subscribed.' });
-  } catch (error) {
-    console.error('Database insertion error:', error);
-    return res.status(500).json({ error: 'An internal server error occurred.' });
+    const uid = req.session.userId;
+    const r = await pool.query(`SELECT email FROM emails WHERE user_id = $1 ORDER BY created_at DESC`, [uid]);
+    return res.json(r.rows);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to fetch emails.' });
   }
 });
 
-app.get('/api/emails', async (req, res) => {
+app.delete('/api/emails/:email', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('SELECT email FROM emails ORDER BY created_at DESC');
-    res.status(200).json(result.rows);
-  } catch (error) {
-    console.error('Database query error:', error);
-    return res.status(500).json({ error: 'An internal server error occurred.' });
+    const uid = req.session.userId;
+    const email = decodeURIComponent(req.params.email || '');
+    await pool.query(`DELETE FROM emails WHERE user_id = $1 AND email = $2`, [uid, email]);
+    return res.json({ message: '削除しました。' });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to delete email.' });
   }
 });
 
-app.delete('/api/emails/:email', async (req, res) => {
-  const { email } = req.params;
-
-  if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
-    return res.status(400).json({ error: 'Please provide a valid email address.' });
-  }
-
+// 手動送信ボタン（必要なら）
+app.post('/api/send-emails', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('DELETE FROM emails WHERE email = $1 RETURNING email', [email]);
-    if (result.rowCount > 0) return res.status(200).json({ message: `Email ${email} deleted successfully.` });
-    return res.status(404).json({ error: `Email ${email} not found.` });
-  } catch (error) {
-    console.error('Database deletion error:', error);
-    return res.status(500).json({ error: 'An internal server error occurred.' });
-  }
-});
+    const uid = req.session.userId;
+    const r = await pool.query(`SELECT email FROM emails WHERE user_id = $1`, [uid]);
+    const list = r.rows.map((x) => x.email);
 
-app.post('/api/send-emails', async (req, res) => {
-  if (!transporter) {
-    return res.status(500).json({ error: 'Email service is not configured. Please check the server logs.' });
-  }
+    if (list.length === 0) return res.json({ message: '送信先がありません。' });
 
-  try {
-    const result = await pool.query('SELECT email FROM emails');
-    const emails = result.rows.map((row) => row.email);
+    await sendMail({
+      to: list.join(','),
+      subject: 'Parabolic Notification',
+      text: 'テスト送信です。',
+    });
 
-    if (emails.length === 0) {
-      return res.status(404).json({ message: 'No emails found to send.' });
-    }
-
-    let mailOptions = {
-      from: `"Parabolic" <${gmailUserForFrom || process.env.GMAIL_USER}>`,
-      subject: '条件達成',
-      text: 'おめでとうございます。条件達成です。',
-      html: '<p>おめでとうございます。条件達成です。</p>',
-    };
-
-    mailOptions = { ...mailOptions, ...appendSiteBlockToMail(mailOptions.text, mailOptions.html) };
-
-    for (const email of emails) {
-      await transporter.sendMail({ ...mailOptions, to: email });
-      console.log(`Email sent to ${email}`);
-    }
-
-    res.status(200).json({ message: 'Emails sent successfully.' });
-  } catch (error) {
-    console.error('Error sending emails:', error);
-    res.status(500).json({ error: 'An internal server error occurred while sending emails.' });
+    return res.json({ message: 'メールを送信しました。' });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to send emails.' });
   }
 });
 
 // =====================
-//   Price Data APIs
+// API: Market data (for client charts)
 // =====================
-
-app.get('/api/crypto/tickers', async (req, res) => {
-  const hardcodedTickers = [
-    'ADA-USD', 'AVAX-USD', 'BCH-USD', 'BTC-USD', 'DOGE-USD', 'DOT-USD',
-    'ETH-USD', 'LINK-USD', 'LTC-USD', 'MATIC-USD', 'SOL-USD', 'UNI-USD', 'XRP-USD'
-  ].sort();
-
-  res.json(hardcodedTickers);
-});
-
 app.get('/api/data', async (req, res) => {
-  const { ticker, interval } = req.query;
-  console.log(`Received request for /api/data: ticker=${ticker}, interval=${interval}`);
-
-  if (!ticker || !interval) {
-    return res.status(400).json({ error: 'Ticker and interval are required' });
-  }
-
-  const cacheKey = `stock-${ticker}-${interval}`;
-  const now = Date.now();
-
-  if (cache[cacheKey] && now - cache[cacheKey].timestamp < CACHE_TTL) {
-    return res.json(cache[cacheKey].data);
-  }
-
-  if (!isValidInterval(interval)) {
-    return res.status(400).json({ error: `Invalid interval. Valid intervals are: ${VALID_INTERVALS.join(', ')}` });
-  }
-
-  let daysToFetch = getDaysToFetchForInterval(interval);
-  let actualInterval = interval;
-
-  if (interval === '4h' || interval === '8h') {
-    actualInterval = '1h';
-  }
-
   try {
-    const period2 = new Date();
-    const period1 = new Date(period2.getTime() - daysToFetch * 24 * 60 * 60 * 1000);
+    const ticker = req.query.ticker;
+    const interval = req.query.interval || '1d';
+    if (!ticker) return res.status(400).json({ error: 'ticker required' });
 
-    const quotes = await fetchYahooChartQuotes(ticker, actualInterval, period1, period2);
-
-    if (!quotes || quotes.length === 0) {
-      return res.status(404).json({ error: `No data found for ticker: ${ticker}` });
-    }
-
-    cache[cacheKey] = { timestamp: Date.now(), data: quotes };
-    res.json(quotes);
-  } catch (error) {
-    console.error('api/data error:', error);
-    res.status(500).json({ error: 'Failed to fetch data from Yahoo Finance' });
+    const candles = await getCandlesWithCache(ticker, interval);
+    const out = candles.map((c) => ({
+      date: new Date(c.time * 1000).toISOString(),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
+    return res.json(out);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to fetch data.' });
   }
 });
 
-// USD/JPY endpoint
 app.get('/api/usd_jpy_data', async (req, res) => {
-  const ticker = 'USDJPY=X';
-  let { interval } = req.query;
-
-  if (!interval) interval = '1d';
-
-  if (!isValidInterval(interval)) {
-    return res.status(400).json({ error: `Invalid interval. Valid intervals are: ${VALID_INTERVALS.join(', ')}` });
-  }
-
-  const cacheKey = `usd_jpy-${ticker}-${interval}`;
-  const now = Date.now();
-
-  if (cache[cacheKey] && now - cache[cacheKey].timestamp < CACHE_TTL) {
-    return res.json(cache[cacheKey].data);
-  }
-
-  let daysToFetch = getDaysToFetchForInterval(interval);
-  let actualInterval = interval;
-
-  if (interval === '4h' || interval === '8h') {
-    actualInterval = '1h';
-  }
-
   try {
-    const period2 = new Date();
-    const period1 = new Date(period2.getTime() - daysToFetch * 24 * 60 * 60 * 1000);
-
-    const quotes = await fetchYahooChartQuotes(ticker, actualInterval, period1, period2);
-
-    if (!quotes || quotes.length === 0) {
-      return res.status(404).json({ error: `No data found for USD/JPY with interval ${interval}.` });
-    }
-
-    cache[cacheKey] = { timestamp: Date.now(), data: quotes };
-    res.json(quotes);
-  } catch (error) {
-    console.error('api/usd_jpy_data error:', error);
-    res.status(500).json({ error: 'Failed to fetch USD/JPY data from Yahoo Finance' });
+    const interval = req.query.interval || '1d';
+    const candles = await getCandlesWithCache('USDJPY=X', interval);
+    const out = candles.map((c) => ({
+      date: new Date(c.time * 1000).toISOString(),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
+    return res.json(out);
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'Failed to fetch USDJPY data.' });
   }
 });
 
-/**
- * ★ interval を引数で受け取り、メールに表示する（ドル円）
- */
-async function sendThresholdEmail(user, indicatorName, crossedPrice, currentPrice, crossedTimestamp, intervalForEmail, userThreshold) {
-  try {
-    const settings = user?.settings || {};
-    if (settings.emailAlertsEnabled === false) {
-      console.log(`Email suppressed (emailAlertsEnabled=false) for user ${user?.id} (${user?.email})`);
-      return;
-    }
-  } catch {}
+// 例：プルダウン用
+app.get('/api/crypto/tickers', async (req, res) => {
+  return res.json(['BTC-USD', 'ETH-USD', 'BCH-USD', 'SOL-USD', 'XRP-USD', 'DOGE-USD']);
+});
 
-  if (!transporter) {
-    console.error(`Email not sent for user ${user.email}: Email service is not configured.`);
-    return;
-  }
-
-  const priceDifference = Math.abs(currentPrice - crossedPrice);
-  const now = new Date();
-
-  const intervalLabel = intervalForEmail || 'unknown';
-  const indicatorLabel = getIndicatorDisplayName(indicatorName);
-
-  const subject = `【Parabolic】【${intervalLabel}】ドル円価格アラート: ${indicatorLabel} のしきい値達成`;
-  const baseText = `
-こんにちは、${user.username}さん
-
-設定された価格アラートの条件が達成されましたのでお知らせします。
-
----
-詳細
----
-- 監視対象: USD/JPY
-- 時間足(間隔): ${intervalLabel}
-- トリガー指標: ${indicatorLabel}
-- クロス発生時刻: ${new Date(crossedTimestamp).toLocaleString('ja-JP')}
-- クロス時価格: ${crossedPrice.toFixed(3)} 円
-- 設定しきい値: ±${userThreshold.toFixed(3)} 円
-- 現在時刻: ${now.toLocaleString('ja-JP')}
-- 現在価格: ${currentPrice.toFixed(3)} 円
-- クロス時からの変動幅: ${priceDifference.toFixed(3)} 円
-
----
-
-Parabolic Chart
-`;
-
-  const baseHtml = `
-    <p>こんにちは、${user.username}さん</p>
-    <p>設定された価格アラートの条件が達成されましたのでお知らせします。</p>
-    <hr>
-    <h3>詳細</h3>
-    <ul>
-      <li><b>監視対象:</b> USD/JPY</li>
-      <li><b>時間足(間隔):</b> ${intervalLabel}</li>
-      <li><b>トリガー指標:</b> ${indicatorLabel}</li>
-      <li><b>クロス発生時刻:</b> ${new Date(crossedTimestamp).toLocaleString('ja-JP')}</li>
-      <li><b>クロス時価格:</b> ${crossedPrice.toFixed(3)} 円</li>
-      <li><b>設定しきい値:</b> ±${userThreshold.toFixed(3)} 円</li>
-      <li><b>現在時刻:</b> ${now.toLocaleString('ja-JP')}</li>
-      <li><b>現在価格:</b> ${currentPrice.toFixed(3)} 円</li>
-      <li><b>クロス時からの変動幅:</b> ${priceDifference.toFixed(3)} 円</li>
-    </ul>
-    <hr>
-    <p>Parabolic Chart</p>
-  `;
-
-  const { text, html } = appendSiteBlockToMail(baseText, baseHtml);
-
-  const mailOptions = {
-    from: `"Parabolic" <${gmailUserForFrom || process.env.GMAIL_USER}>`,
-    to: user.email,
-    subject,
-    text,
-    html,
-  };
-
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Threshold alert email sent to ${user.email} for ${indicatorName}.`);
-  } catch (error) {
-    console.error(`Failed to send threshold alert email to ${user.email}:`, error);
-  }
+// =====================
+// Cross detection helpers
+// =====================
+function crossed(prevClose, curClose, prevLine, curLine) {
+  if (![prevClose, curClose, prevLine, curLine].every((x) => Number.isFinite(x))) return false;
+  const wasBelow = prevClose < prevLine;
+  const isAbove = curClose >= curLine;
+  const wasAbove = prevClose > prevLine;
+  const isBelow = curClose <= curLine;
+  return (wasBelow && isAbove) || (wasAbove && isBelow);
 }
 
-/**
- * ★ interval を引数で受け取り、メールに表示する（仮想通貨）
- */
-async function sendCryptoThresholdEmail(user, ticker, indicatorName, crossedPrice, currentPrice, crossedTimestamp, intervalForEmail, userThreshold) {
-  try {
-    const settings = user?.settings || {};
-    if (settings.emailAlertsEnabled === false) {
-      console.log(`Email suppressed (emailAlertsEnabled=false) for user ${user?.id} (${user?.email}) for crypto ticker ${ticker}`);
-      return;
-    }
-  } catch {}
-
-  if (!transporter) {
-    console.error(`Email not sent for user ${user.email}: Email service is not configured.`);
-    return;
-  }
-
-  const priceDifference = Math.abs(currentPrice - crossedPrice);
-  const now = new Date();
-  const intervalLabel = intervalForEmail || 'unknown';
-  const indicatorLabel = getIndicatorDisplayName(indicatorName);
-
-  const subject = `【Parabolic】【${intervalLabel}】仮想通貨価格アラート (${ticker}): ${indicatorLabel} のしきい値達成`;
-  const baseText = `
-こんにちは、${user.username}さん
-
-仮想通貨 (${ticker}) の価格アラート条件が達成されました。
-
----
-詳細
----
-- 監視対象: ${ticker}
-- 時間足(間隔): ${intervalLabel}
-- トリガー指標: ${indicatorLabel}
-- クロス発生時刻: ${new Date(crossedTimestamp).toLocaleString('ja-JP')}
-- クロス時価格: ${crossedPrice.toFixed(8)}
-- 設定しきい値: ±${Number(userThreshold).toFixed(8)}
-- 現在時刻: ${now.toLocaleString('ja-JP')}
-- 現在価格: ${currentPrice.toFixed(8)}
-- クロス時からの変動幅: ${priceDifference.toFixed(8)}
-
----
-
-Parabolic Chart
-`;
-
-  const baseHtml = `
-    <p>こんにちは、${user.username}さん</p>
-    <p>仮想通貨 (${ticker}) の価格アラート条件が達成されました。</p>
-    <hr>
-    <h3>詳細</h3>
-    <ul>
-      <li><b>監視対象:</b> ${ticker}</li>
-      <li><b>時間足(間隔):</b> ${intervalLabel}</li>
-      <li><b>トリガー指標:</b> ${indicatorLabel}</li>
-      <li><b>クロス発生時刻:</b> ${new Date(crossedTimestamp).toLocaleString('ja-JP')}</li>
-      <li><b>クロス時価格:</b> ${crossedPrice.toFixed(8)}</li>
-      <li><b>設定しきい値:</b> ±${Number(userThreshold).toFixed(8)}</li>
-      <li><b>現在時刻:</b> ${now.toLocaleString('ja-JP')}</li>
-      <li><b>現在価格:</b> ${currentPrice.toFixed(8)}</li>
-      <li><b>クロス時からの変動幅:</b> ${priceDifference.toFixed(8)}</li>
-    </ul>
-    <hr>
-    <p>Parabolic Chart</p>
-  `;
-
-  const { text, html } = appendSiteBlockToMail(baseText, baseHtml);
-
-  const mailOptions = {
-    from: `"Parabolic" <${gmailUserForFrom || process.env.GMAIL_USER}>`,
-    to: user.email,
-    subject,
-    text,
-    html,
-  };
-
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Crypto threshold alert email sent to ${user.email} for ${ticker} and ${indicatorName}.`);
-  } catch (error) {
-    console.error(`Failed to send crypto threshold alert email to ${user.email}:`, error);
-  }
+function eventObj(price, interval) {
+  return { price, interval, timestamp: nowIso() };
 }
 
-/**
- * ✅ クロス判定（終値＝SMA(1) と BB/EMA のクロス）ドル円
- */
-async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, intervalLabel, assetDisplayName) {
-  let stateChanged = false;
-  const settings = user.settings || {};
-  const userInterval = intervalLabel || settings.currentInterval || '5m';
+// =====================
+// Watchers (USDJPY + Crypto)
+// =====================
+async function processUsdJpyForUser(userId, settings) {
+  const iv = normalizeInterval(settings.currentInterval || '1d');
 
-  try {
-    const minDataPoints = 55;
-    if (!Array.isArray(quotes) || quotes.length < minDataPoints) return false;
+  const bbEnabled = settings.areBollingerBandsVisible !== false;
+  const emaEnabled = settings.areEmaVisible !== false;
+  const emailEnabled = settings.emailAlertsEnabled !== false;
 
-    const closePrices = quotes.map((q) => q.close);
-    const lastCandle = quotes[quotes.length - 1];
-    const secondLastCandle = quotes[quotes.length - 2];
+  const rt = ensureRealTimeState(settings);
+  const crossHistory = rt.crossHistory;
+  const ivMap = ensureIntervalMap(crossHistory, iv);
 
+  const candles = await getCandlesWithCache('USDJPY=X', iv);
+  if (!candles || candles.length < 30) return;
+
+  const closes = candles.map((c) => c.close);
+  const prevClose = closes[closes.length - 2];
+  const curClose = closes[closes.length - 1];
+
+  // price update (UIの現在値更新用)
+  io.to(userRoom(userId)).emit('usd_jpy_price_update', { price: curClose });
+
+  // ---- BB cross ----
+  const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
+  const bbStdDev = Number(settings.bbStdDev) || 2;
+
+  if (bbEnabled) {
+    const bb1 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: 1 });
+    const bb2 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: bbStdDev });
+
+    if (bb1.length >= 2 && bb2.length >= 2) {
+      const prevIdx = bb1.length - 2;
+      const curIdx = bb1.length - 1;
+
+      const prev1 = bb1[prevIdx];
+      const cur1 = bb1[curIdx];
+      const prev2 = bb2[prevIdx];
+      const cur2 = bb2[curIdx];
+
+      const checks = [
+        { key: 'upper2', prev: prev2.upper, cur: cur2.upper, label: '+2σ' },
+        { key: 'upper1', prev: prev1.upper, cur: cur1.upper, label: '+1σ' },
+        { key: 'middle', prev: prev1.middle, cur: cur1.middle, label: '0σ' },
+        { key: 'lower1', prev: prev1.lower, cur: cur1.lower, label: '-1σ' },
+        { key: 'lower2', prev: prev2.lower, cur: cur2.lower, label: '-2σ' },
+      ];
+
+      for (const x of checks) {
+        if (crossed(prevClose, curClose, x.prev, x.cur)) {
+          ivMap[x.key] = eventObj(curClose, iv);
+          io.to(userRoom(userId)).emit('bb_cross', {
+            bandName: x.key,
+            interval: iv,
+            price: curClose,
+            timestamp: ivMap[x.key].timestamp,
+            message: `USD/JPY: 価格がBB ${x.label} をクロスしました (${iv})`,
+          });
+        }
+      }
+    }
+  }
+
+  // ---- EMA cross ----
+  const emaPeriods = [
+    parseInt(settings.ema1Period, 10) || 10,
+    parseInt(settings.ema2Period, 10) || 25,
+    parseInt(settings.ema3Period, 10) || 50,
+  ];
+
+  if (emaEnabled) {
+    for (const p of emaPeriods) {
+      const ema = EMA.calculate({ period: p, values: closes, exact: false });
+      if (ema.length < 2) continue;
+
+      const prevE = ema[ema.length - 2];
+      const curE = ema[ema.length - 1];
+
+      if (crossed(prevClose, curClose, prevE, curE)) {
+        const key = `ema${p}`;
+        ivMap[key] = eventObj(curClose, iv);
+        io.to(userRoom(userId)).emit('ema_cross', {
+          emaName: key,
+          interval: iv,
+          price: curClose,
+          timestamp: ivMap[key].timestamp,
+          message: `USD/JPY: 価格がEMA(${p})をクロスしました (${iv})`,
+        });
+      }
+    }
+  }
+
+  // ---- Threshold email + clear (respect toggles) ----
+  if (emailEnabled) {
+    const x = normalizeXValue(settings.x_values?.[iv]);
+    if (x != null) {
+      const rMail = await pool.query(`SELECT email FROM users WHERE id = $1`, [userId]);
+      const userEmail = rMail.rows[0]?.email || null;
+
+      const rSubs = await pool.query(`SELECT email FROM emails WHERE user_id = $1`, [userId]);
+      const extra = rSubs.rows.map((z) => z.email);
+      const recipients = [userEmail, ...extra].filter(Boolean);
+
+      if (recipients.length > 0) {
+        for (const [name, ev] of Object.entries(ivMap || {})) {
+          if (!ev || typeof ev !== 'object' || !Number.isFinite(ev.price)) continue;
+
+          const isEma = String(name).startsWith('ema');
+          if (isEma && !emaEnabled) continue;
+          if (!isEma && !bbEnabled) continue;
+
+          const diff = Math.abs(curClose - ev.price);
+          if (diff >= x) {
+            await sendMail({
+              to: recipients.join(','),
+              subject: `USD/JPY Alert (${iv})`,
+              text: `USD/JPY がしきい値に到達しました。\ninterval=${iv}\nindicator=${name}\ncrossPrice=${ev.price}\ncurrentPrice=${curClose}\ndiff=${diff}\nthreshold=${x}`,
+            });
+
+            // clear
+            ivMap[name] = null;
+            io.to(userRoom(userId)).emit('cross_history_cleared', { indicatorName: name, interval: iv });
+          }
+        }
+      }
+    }
+  }
+
+  settings.realTimeState = rt;
+  await upsertUserSettings(userId, settings);
+}
+
+async function processCryptoForUser(userId, settings) {
+  const bbEnabled = settings.areBollingerBandsVisible !== false;
+  const emaEnabled = settings.areEmaVisible !== false;
+  const emailEnabled = settings.emailAlertsEnabled !== false;
+
+  const rt = ensureRealTimeState(settings);
+  const root = ensureCryptoPerTickerState(rt);
+
+  // 監視対象：crypto_x_values に載ってる ticker を優先。無ければ currentCryptoTicker
+  const cx = ensureObj(settings.crypto_x_values);
+  const tickers =
+    Object.keys(cx).length > 0 ? Object.keys(cx) : [settings.currentCryptoTicker || 'BTC-USD'];
+
+  const iv = normalizeInterval(settings.currentInterval || '1d');
+
+  for (const ticker of tickers) {
+    if (!ticker) continue;
+
+    if (!root[ticker] || typeof root[ticker] !== 'object') root[ticker] = {};
+    const byIv = root[ticker];
+    const ivMap = ensureIntervalMap(byIv, iv);
+
+    const candles = await getCandlesWithCache(ticker, iv);
+    if (!candles || candles.length < 30) continue;
+
+    const closes = candles.map((c) => c.close);
+    const prevClose = closes[closes.length - 2];
+    const curClose = closes[closes.length - 1];
+
+    // ---- BB cross ----
     const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
-    const bbStdDev = parseFloat(settings.bbStdDev) || 2;
+    const bbStdDev = Number(settings.bbStdDev) || 2;
 
+    if (bbEnabled) {
+      const bb1 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: 1 });
+      const bb2 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: bbStdDev });
+
+      if (bb1.length >= 2 && bb2.length >= 2) {
+        const prev1 = bb1[bb1.length - 2];
+        const cur1 = bb1[bb1.length - 1];
+        const prev2 = bb2[bb2.length - 2];
+        const cur2 = bb2[bb2.length - 1];
+
+        const checks = [
+          { key: 'upper2', prev: prev2.upper, cur: cur2.upper, label: '+2σ' },
+          { key: 'upper1', prev: prev1.upper, cur: cur1.upper, label: '+1σ' },
+          { key: 'middle', prev: prev1.middle, cur: cur1.middle, label: '0σ' },
+          { key: 'lower1', prev: prev1.lower, cur: cur1.lower, label: '-1σ' },
+          { key: 'lower2', prev: prev2.lower, cur: cur2.lower, label: '-2σ' },
+        ];
+
+        for (const x of checks) {
+          if (crossed(prevClose, curClose, x.prev, x.cur)) {
+            ivMap[x.key] = eventObj(curClose, iv);
+            io.to(userRoom(userId)).emit('crypto_bb_cross', {
+              ticker,
+              bandName: x.key,
+              interval: iv,
+              price: curClose,
+              timestamp: ivMap[x.key].timestamp,
+              message: `${ticker}: 価格がBB ${x.label} をクロスしました (${iv})`,
+            });
+          }
+        }
+      }
+    }
+
+    // ---- EMA cross ----
     const emaPeriods = [
       parseInt(settings.ema1Period, 10) || 10,
       parseInt(settings.ema2Period, 10) || 25,
       parseInt(settings.ema3Period, 10) || 50,
     ];
 
-    const indicatorValues = {};
+    if (emaEnabled) {
+      for (const p of emaPeriods) {
+        const ema = EMA.calculate({ period: p, values: closes, exact: false });
+        if (ema.length < 2) continue;
 
-    const bbResult1 = BollingerBands.calculate({ period: bbPeriod, values: closePrices, stdDev: 1 });
-    const bbResult2 = BollingerBands.calculate({ period: bbPeriod, values: closePrices, stdDev: bbStdDev });
+        const prevE = ema[ema.length - 2];
+        const curE = ema[ema.length - 1];
 
-    if (bbResult1.length >= 2 && bbResult2.length >= 2) {
-      indicatorValues['middle'] = { last: bbResult1[bbResult1.length - 1].middle, secondLast: bbResult1[bbResult1.length - 2].middle };
-      indicatorValues['upper1'] = { last: bbResult1[bbResult1.length - 1].upper, secondLast: bbResult1[bbResult1.length - 2].upper };
-      indicatorValues['lower1'] = { last: bbResult1[bbResult1.length - 1].lower, secondLast: bbResult1[bbResult1.length - 2].lower };
-      indicatorValues['upper2'] = { last: bbResult2[bbResult2.length - 1].upper, secondLast: bbResult2[bbResult2.length - 2].upper };
-      indicatorValues['lower2'] = { last: bbResult2[bbResult2.length - 1].lower, secondLast: bbResult2[bbResult2.length - 2].lower };
-    }
-
-    emaPeriods.forEach((p) => {
-      const emaResult = EMA.calculate({ period: p, values: closePrices });
-      if (emaResult.length >= 2) {
-        indicatorValues['ema' + p] = { last: emaResult[emaResult.length - 1], secondLast: emaResult[emaResult.length - 2] };
-      }
-    });
-
-    if (!realTimeState.crossHistory) realTimeState.crossHistory = {};
-    if (!realTimeState.crossHistory[userInterval]) realTimeState.crossHistory[userInterval] = {};
-
-    if (!realTimeState.lastCrossTimestamps) realTimeState.lastCrossTimestamps = {};
-    if (!realTimeState.lastCrossTimestamps[userInterval]) realTimeState.lastCrossTimestamps[userInterval] = {};
-
-    for (const indicatorName in indicatorValues) {
-      const { last, secondLast } = indicatorValues[indicatorName];
-      if (last === undefined || secondLast === undefined) continue;
-
-      const lastRelPosition = lastCandle.close > last ? 'above' : 'below';
-      const secondLastRelPosition = secondLastCandle.close > secondLast ? 'above' : 'below';
-
-      if (lastRelPosition !== secondLastRelPosition) {
-        const crossPrice = lastCandle.close;
-        const crossTimestamp = lastCandle.date;
-        const tsIso = crossTimestamp instanceof Date ? crossTimestamp.toISOString() : new Date(crossTimestamp).toISOString();
-
-        const lastSeenTs = realTimeState.lastCrossTimestamps[userInterval]?.[indicatorName];
-        if (lastSeenTs === tsIso) {
-          continue;
-        }
-
-        realTimeState.lastCrossTimestamps[userInterval][indicatorName] = tsIso;
-
-        realTimeState.crossHistory[userInterval][indicatorName] = {
-          price: crossPrice,
-          timestamp: tsIso,
-          interval: userInterval,
-        };
-        stateChanged = true;
-
-        const indicatorLabel = getIndicatorDisplayName(indicatorName);
-
-        console.log(
-          `User ${user.id}: ${assetDisplayName} CLOSE(SMA1)-BASED cross detected for ${indicatorName}(${indicatorLabel}) at price ${crossPrice} on interval ${userInterval}`
-        );
-
-        const socketId = socketMap.get(user.id);
-        if (socketId) {
-          const eventName = indicatorName.startsWith('ema') ? 'ema_cross' : 'bb_cross';
-          const eventPayload = {
-            message: `${assetDisplayName}が ${indicatorLabel} を終値で${lastRelPosition === 'above' ? '上抜け' : '下抜け'}しました！ (間隔: ${userInterval})`,
-            price: crossPrice,
-            crossDirection: lastRelPosition === 'above' ? 'up' : 'down',
-            timestamp: tsIso,
-            interval: userInterval,
-            [eventName === 'ema_cross' ? 'emaName' : 'bandName']: indicatorName,
-            [eventName === 'ema_cross' ? 'emaValue' : 'bandValue']: last,
-            [eventName === 'ema_cross' ? 'emaLabel' : 'bandLabel']: indicatorLabel,
-          };
-          io.to(socketId).emit(eventName, eventPayload);
-        }
-      }
-    }
-  } catch (error) {
-    console.error(`Error in monitorSma1Value for user ${user.id}:`, error);
-  }
-  return stateChanged;
-}
-
-/**
- * ✅ クロス判定（終値＝SMA(1) と BB/EMA のクロス）仮想通貨
- * ✅ FIX: tickerごとに crossHistory を分離（BTCとBCHが混ざらない）
- */
-async function monitorSma1ValueForCrypto(user, quotes, realTimeState, socketMap, io, intervalLabel, assetDisplayName) {
-  let stateChanged = false;
-  const settings = user.settings || {};
-  const userInterval = intervalLabel || settings.currentInterval || '5m';
-  const ticker = String(assetDisplayName || settings.currentCryptoTicker || 'UNKNOWN');
-
-  try {
-    const minDataPoints = 55;
-    if (!Array.isArray(quotes) || quotes.length < minDataPoints) return false;
-
-    const closePrices = quotes.map((q) => q.close);
-    const lastCandle = quotes[quotes.length - 1];
-    const secondLastCandle = quotes[quotes.length - 2];
-
-    const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
-    const bbStdDev = parseFloat(settings.bbStdDev) || 2;
-
-    const emaPeriods = [
-      parseInt(settings.ema1Period, 10) || 10,
-      parseInt(settings.ema2Period, 10) || 25,
-      parseInt(settings.ema3Period, 10) || 50,
-    ];
-
-    const indicatorValues = {};
-
-    const bbResult1 = BollingerBands.calculate({ period: bbPeriod, values: closePrices, stdDev: 1 });
-    const bbResult2 = BollingerBands.calculate({ period: bbPeriod, values: closePrices, stdDev: bbStdDev });
-
-    if (bbResult1.length >= 2 && bbResult2.length >= 2) {
-      indicatorValues['middle'] = { last: bbResult1[bbResult1.length - 1].middle, secondLast: bbResult1[bbResult1.length - 2].middle };
-      indicatorValues['upper1'] = { last: bbResult1[bbResult1.length - 1].upper, secondLast: bbResult1[bbResult1.length - 2].upper };
-      indicatorValues['lower1'] = { last: bbResult1[bbResult1.length - 1].lower, secondLast: bbResult1[bbResult1.length - 2].lower };
-      indicatorValues['upper2'] = { last: bbResult2[bbResult2.length - 1].upper, secondLast: bbResult2[bbResult2.length - 2].upper };
-      indicatorValues['lower2'] = { last: bbResult2[bbResult2.length - 1].lower, secondLast: bbResult2[bbResult2.length - 2].lower };
-    }
-
-    emaPeriods.forEach((p) => {
-      const emaResult = EMA.calculate({ period: p, values: closePrices });
-      if (emaResult.length >= 2) {
-        indicatorValues['ema' + p] = { last: emaResult[emaResult.length - 1], secondLast: emaResult[emaResult.length - 2] };
-      }
-    });
-
-    // ✅ per-ticker containers（migrate込み）
-    const { crossHistoryByInterval, lastTsByInterval } = ensureCryptoPerTickerState(realTimeState, ticker, settings.currentInterval || '5m');
-
-    if (!crossHistoryByInterval[userInterval]) crossHistoryByInterval[userInterval] = {};
-    if (!lastTsByInterval[userInterval]) lastTsByInterval[userInterval] = {};
-
-    for (const indicatorName in indicatorValues) {
-      const { last, secondLast } = indicatorValues[indicatorName];
-      if (last === undefined || secondLast === undefined) continue;
-
-      const lastRelPosition = lastCandle.close > last ? 'above' : 'below';
-      const secondLastRelPosition = secondLastCandle.close > secondLast ? 'above' : 'below';
-
-      if (lastRelPosition !== secondLastRelPosition) {
-        const crossPrice = lastCandle.close;
-        const crossTimestamp = lastCandle.date;
-        const tsIso = crossTimestamp instanceof Date ? crossTimestamp.toISOString() : new Date(crossTimestamp).toISOString();
-
-        const lastSeenTs = lastTsByInterval[userInterval]?.[indicatorName];
-        if (lastSeenTs === tsIso) continue;
-
-        lastTsByInterval[userInterval][indicatorName] = tsIso;
-
-        crossHistoryByInterval[userInterval][indicatorName] = {
-          price: crossPrice,
-          timestamp: tsIso,
-          interval: userInterval,
-        };
-        stateChanged = true;
-
-        const indicatorLabel = getIndicatorDisplayName(indicatorName);
-
-        console.log(
-          `User ${user.id}: ${ticker} CRYPTO cross detected for ${indicatorName}(${indicatorLabel}) at price ${crossPrice} on interval ${userInterval}`
-        );
-
-        const socketId = socketMap.get(user.id);
-        if (socketId) {
-          const eventName = indicatorName.startsWith('ema') ? 'crypto_ema_cross' : 'crypto_bb_cross';
-          const eventPayload = {
+        if (crossed(prevClose, curClose, prevE, curE)) {
+          const key = `ema${p}`;
+          ivMap[key] = eventObj(curClose, iv);
+          io.to(userRoom(userId)).emit('crypto_ema_cross', {
             ticker,
-            message: `${ticker}が ${indicatorLabel} を終値で${lastRelPosition === 'above' ? '上抜け' : '下抜け'}しました！ (間隔: ${userInterval})`,
-            price: crossPrice,
-            crossDirection: lastRelPosition === 'above' ? 'up' : 'down',
-            timestamp: tsIso,
-            interval: userInterval,
-            [eventName === 'crypto_ema_cross' ? 'emaName' : 'bandName']: indicatorName,
-            [eventName === 'crypto_ema_cross' ? 'emaValue' : 'bandValue']: last,
-            [eventName === 'crypto_ema_cross' ? 'emaLabel' : 'bandLabel']: indicatorLabel,
-          };
-          io.to(socketId).emit(eventName, eventPayload);
+            emaName: key,
+            interval: iv,
+            price: curClose,
+            timestamp: ivMap[key].timestamp,
+            message: `${ticker}: 価格がEMA(${p})をクロスしました (${iv})`,
+          });
         }
       }
     }
-  } catch (error) {
-    console.error(`Error in monitorSma1ValueForCrypto for user ${user.id}:`, error);
+
+    // ---- Threshold email + clear (respect toggles) ----
+    if (emailEnabled) {
+      const threshold = normalizeXValue(cx?.[ticker]?.[iv]);
+      if (threshold != null) {
+        const rMail = await pool.query(`SELECT email FROM users WHERE id = $1`, [userId]);
+        const userEmail = rMail.rows[0]?.email || null;
+
+        const rSubs = await pool.query(`SELECT email FROM emails WHERE user_id = $1`, [userId]);
+        const extra = rSubs.rows.map((z) => z.email);
+        const recipients = [userEmail, ...extra].filter(Boolean);
+
+        if (recipients.length > 0) {
+          for (const [name, ev] of Object.entries(ivMap || {})) {
+            if (!ev || typeof ev !== 'object' || !Number.isFinite(ev.price)) continue;
+
+            const isEma = String(name).startsWith('ema');
+            if (isEma && !emaEnabled) continue;
+            if (!isEma && !bbEnabled) continue;
+
+            const diff = Math.abs(curClose - ev.price);
+            if (diff >= threshold) {
+              await sendMail({
+                to: recipients.join(','),
+                subject: `${ticker} Alert (${iv})`,
+                text: `${ticker} がしきい値に到達しました。\ninterval=${iv}\nindicator=${name}\ncrossPrice=${ev.price}\ncurrentPrice=${curClose}\ndiff=${diff}\nthreshold=${threshold}`,
+              });
+
+              ivMap[name] = null;
+              io.to(userRoom(userId)).emit('crypto_cross_history_cleared', {
+                ticker,
+                interval: iv,
+                indicatorName: name,
+              });
+            }
+          }
+        }
+      }
+    }
   }
-  return stateChanged;
+
+  settings.realTimeState = rt;
+  await upsertUserSettings(userId, settings);
 }
 
-async function startPriceWatcher() {
-  console.log('Starting DB-centric, always-on USD/JPY price watcher...');
+async function watcherTick() {
+  try {
+    const r = await pool.query(
+      `SELECT u.id AS user_id, s.settings
+       FROM users u
+       LEFT JOIN user_settings s ON s.user_id = u.id`
+    );
 
-  let isTickRunning = false;
+    for (const row of r.rows) {
+      const userId = row.user_id;
+      const settings = ensureObj(row.settings);
 
-  setInterval(async () => {
-    if (isTickRunning) return;
-    isTickRunning = true;
+      // realTimeState を必ず初期化しておく
+      ensureRealTimeState(settings);
 
-    try {
-      const userQuery = `
-        SELECT u.id, u.username, u.email, s.settings
-        FROM users u
-        LEFT JOIN user_settings s ON u.id = s.user_id
-        WHERE s.settings IS NOT NULL
-      `;
-      const { rows: users } = await pool.query(userQuery);
-      if (users.length === 0) return;
-
-      const activeSockets = await io.fetchSockets();
-      const socketMap = new Map();
-      for (const socket of activeSockets) {
-        if (socket.userId) socketMap.set(socket.userId, socket.id);
+      // USDJPY は x_values がある or dataType が usd_jpy の時に動かす
+      const hasUsdX =
+        settings.x_values && typeof settings.x_values === 'object' && Object.keys(settings.x_values).length > 0;
+      const wantsUsd = settings.currentDataType === 'usd_jpy' || hasUsdX;
+      if (wantsUsd) {
+        await processUsdJpyForUser(userId, settings);
       }
 
-      const currentPrice = await fetchCurrentPrice('USDJPY=X');
-
-      if (currentPrice == null) {
-        console.error('Failed to fetch current USD/JPY price (quote & chart both failed). Continuing without live price...');
-      } else {
-        io.emit('usd_jpy_price_update', { price: currentPrice, timestamp: new Date() });
+      // crypto は crypto_x_values がある or dataType が crypto の時に動かす
+      const hasCryptoX =
+        settings.crypto_x_values &&
+        typeof settings.crypto_x_values === 'object' &&
+        Object.keys(settings.crypto_x_values).length > 0;
+      const wantsCrypto = settings.currentDataType === 'crypto' || hasCryptoX;
+      if (wantsCrypto) {
+        await processCryptoForUser(userId, settings);
       }
-
-      const perUserIntervals = new Map();
-      const allIntervals = new Set();
-
-      for (const user of users) {
-        const settings = user.settings || {};
-        const intervals = getUserMonitoredIntervals(settings);
-        const fallback = settings.currentInterval || '5m';
-        const finalIntervals = intervals.length > 0 ? intervals : [fallback];
-
-        perUserIntervals.set(user.id, finalIntervals);
-        for (const iv of finalIntervals) allIntervals.add(iv);
-      }
-
-      const quotesByInterval = {};
-      for (const iv of allIntervals) {
-        try {
-          const q = await fetchQuotesForWatcher('USDJPY=X', iv);
-          if (Array.isArray(q) && q.length > 0) quotesByInterval[iv] = q;
-        } catch (e) {
-          console.error(`Watcher quotes fetch failed for interval ${iv}:`, e?.message || e);
-        }
-      }
-
-      for (const user of users) {
-        const settings = user.settings || {};
-        const realTimeState = settings.realTimeState || {};
-        realTimeState.crossHistory = normalizeCrossHistoryToNested(realTimeState.crossHistory || {}, settings.currentInterval || '5m');
-
-        let stateChanged = false;
-
-        if (currentPrice != null) {
-          const x_values = settings.x_values || {};
-          const crossHistory = realTimeState.crossHistory || {};
-
-          for (const [iv, indicatorMap] of Object.entries(crossHistory)) {
-            if (!indicatorMap || typeof indicatorMap !== 'object') continue;
-
-            const thresholdForInterval = Number(x_values[iv]);
-            if (!Number.isFinite(thresholdForInterval) || thresholdForInterval <= 0) continue;
-
-            for (const [indicatorName, crossEvent] of Object.entries(indicatorMap)) {
-              if (!crossEvent || !isCrossEventObject(crossEvent)) continue;
-
-              const crossedPrice = crossEvent.price;
-              const priceDifference = Math.abs(currentPrice - crossedPrice);
-
-              if (priceDifference >= thresholdForInterval) {
-                const crossedTs = crossEvent.timestamp ? new Date(crossEvent.timestamp) : new Date();
-
-                const emailEnabled = settings.emailAlertsEnabled !== false;
-
-                if (emailEnabled) {
-                  await sendThresholdEmail(user, indicatorName, crossedPrice, currentPrice, crossedTs, iv, thresholdForInterval);
-                } else {
-                  console.log(
-                    `Threshold reached but email suppressed (emailAlertsEnabled=false): user=${user.id}, interval=${iv}, indicator=${indicatorName}`
-                  );
-                }
-
-                indicatorMap[indicatorName] = null;
-                stateChanged = true;
-
-                const socketId = socketMap.get(user.id);
-                if (socketId) {
-                  io.to(socketId).emit('cross_history_cleared', {
-                    indicatorName,
-                    interval: iv,
-                    timestamp: new Date().toISOString(),
-                  });
-                }
-              }
-            }
-          }
-        }
-
-        const intervals = perUserIntervals.get(user.id) || [settings.currentInterval || '5m'];
-
-        for (const iv of intervals) {
-          const quotesForDetection = quotesByInterval[iv];
-          if (!quotesForDetection) continue;
-
-          const crossDetectionStateChanged = await monitorSma1Value(user, quotesForDetection, realTimeState, socketMap, io, iv, 'USD/JPY');
-          stateChanged = stateChanged || crossDetectionStateChanged;
-        }
-
-        if (stateChanged) {
-          const newSettings = { ...settings, realTimeState };
-          const upsertQuery = `
-            INSERT INTO user_settings (user_id, settings) VALUES ($1, $2)
-            ON CONFLICT (user_id) DO UPDATE SET settings = $2
-          `;
-          await pool.query(upsertQuery, [user.id, newSettings]);
-        }
-      }
-    } catch (error) {
-      console.error('Error in price watcher:', error);
-    } finally {
-      isTickRunning = false;
     }
-  }, 15000);
+  } catch (e) {
+    console.error('[watcherTick] error:', e);
+  }
 }
 
-async function startCryptoPriceWatcher() {
-  console.log('Starting DB-centric, always-on Crypto price watcher...');
+let watcherStarted = false;
+function startWatchers() {
+  if (watcherStarted) return;
+  watcherStarted = true;
 
-  let isTickRunning = false;
-
-  setInterval(async () => {
-    if (isTickRunning) return;
-    isTickRunning = true;
-
-    try {
-      const userQuery = `
-        SELECT u.id, u.username, u.email, s.settings
-        FROM users u
-        LEFT JOIN user_settings s ON u.id = s.user_id
-        WHERE s.settings IS NOT NULL AND s.settings->>'currentCryptoTicker' IS NOT NULL
-      `;
-      const { rows: users } = await pool.query(userQuery);
-      if (users.length === 0) return;
-
-      const activeSockets = await io.fetchSockets();
-      const socketMap = new Map();
-      for (const socket of activeSockets) {
-        if (socket.userId) socketMap.set(socket.userId, socket.id);
-      }
-
-      // Group users by their last saved ticker
-      const tickersToWatch = new Map();
-      for (const user of users) {
-        const ticker = user.settings?.currentCryptoTicker;
-        if (ticker) {
-          if (!tickersToWatch.has(ticker)) tickersToWatch.set(ticker, []);
-          tickersToWatch.get(ticker).push(user);
-        }
-      }
-
-      for (const [ticker, usersForTicker] of tickersToWatch.entries()) {
-        const currentPrice = await fetchCurrentPrice(ticker);
-
-        if (currentPrice != null) {
-          io.emit('price_update', { ticker, price: currentPrice, timestamp: new Date() });
-        }
-
-        const allIntervals = new Set();
-        for (const user of usersForTicker) {
-          const intervals = getUserMonitoredIntervalsForCrypto(user.settings, ticker);
-          const fallback = user.settings.currentInterval || '5m';
-          const finalIntervals = intervals.length > 0 ? intervals : [fallback];
-          for (const iv of finalIntervals) allIntervals.add(iv);
-        }
-
-        const quotesByInterval = {};
-        for (const iv of allIntervals) {
-          try {
-            const q = await fetchQuotesForWatcher(ticker, iv);
-            if (Array.isArray(q) && q.length > 0) quotesByInterval[iv] = q;
-          } catch (e) {
-            console.error(`Crypto Watcher quotes fetch failed for ${ticker} interval ${iv}:`, e?.message || e);
-          }
-        }
-
-        for (const user of usersForTicker) {
-          const settings = user.settings || {};
-          const realTimeState = settings.realTimeState || {};
-
-          // ✅ FIX: tickerごとに分離（migrate込み）
-          const { crossHistoryByInterval } = ensureCryptoPerTickerState(realTimeState, ticker, settings.currentInterval || '5m');
-
-          let stateChanged = false;
-
-          if (currentPrice != null) {
-            const crypto_x_values = settings.crypto_x_values || {};
-            const thresholdsForTicker = crypto_x_values[ticker] || {};
-            const cryptoCrossHistory = crossHistoryByInterval || {};
-
-            for (const [iv, indicatorMap] of Object.entries(cryptoCrossHistory)) {
-              if (!indicatorMap || typeof indicatorMap !== 'object') continue;
-
-              const thresholdForInterval = Number(thresholdsForTicker[iv]);
-              if (!Number.isFinite(thresholdForInterval) || thresholdForInterval <= 0) continue;
-
-              for (const [indicatorName, crossEvent] of Object.entries(indicatorMap)) {
-                if (!crossEvent || !isCrossEventObject(crossEvent)) continue;
-
-                const priceDifference = Math.abs(currentPrice - crossEvent.price);
-                if (priceDifference >= thresholdForInterval) {
-                  await sendCryptoThresholdEmail(
-                    user,
-                    ticker,
-                    indicatorName,
-                    crossEvent.price,
-                    currentPrice,
-                    new Date(crossEvent.timestamp),
-                    iv,
-                    thresholdForInterval
-                  );
-
-                  // ✅ このtickerのこのintervalだけ消す
-                  indicatorMap[indicatorName] = null;
-                  stateChanged = true;
-
-                  const socketId = socketMap.get(user.id);
-                  if (socketId) {
-                    io.to(socketId).emit('crypto_cross_history_cleared', {
-                      ticker,
-                      indicatorName,
-                      interval: iv,
-                      timestamp: new Date().toISOString(),
-                    });
-                  }
-                }
-              }
-            }
-          }
-
-          const userIntervals = getUserMonitoredIntervalsForCrypto(settings, ticker);
-          const fallback = settings.currentInterval || '5m';
-          const finalIntervals = userIntervals.length > 0 ? userIntervals : [fallback];
-
-          for (const iv of finalIntervals) {
-            const quotesForDetection = quotesByInterval[iv];
-            if (!quotesForDetection) continue;
-
-            const crossDetectionStateChanged = await monitorSma1ValueForCrypto(
-              user,
-              quotesForDetection,
-              realTimeState,
-              socketMap,
-              io,
-              iv,
-              ticker
-            );
-            stateChanged = stateChanged || crossDetectionStateChanged;
-          }
-
-          if (stateChanged) {
-            const newSettings = { ...settings, realTimeState };
-            const upsertQuery = `
-              INSERT INTO user_settings (user_id, settings) VALUES ($1, $2)
-              ON CONFLICT (user_id) DO UPDATE SET settings = $2
-            `;
-            await pool.query(upsertQuery, [user.id, newSettings]);
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Error in crypto price watcher:', error);
-    } finally {
-      isTickRunning = false;
-    }
-  }, 17000);
+  // 15秒おき（必要なら調整）
+  setInterval(watcherTick, 15_000);
 }
 
-// --- Server Startup ---
-async function startServer() {
-  await configureNodemailer();
-
-  console.log('Initializing database...');
-  await createUsersTable();
-  await createEmailsTable();
-  await createUserSettingsTable();
-  console.log('Database initialized successfully.');
-
-  server.listen(port, '0.0.0.0', () => {
-    console.log(`Proxy server listening at http://0.0.0.0:${port}`);
-    console.log('API endpoint for stocks: /api/data?ticker=7203.T&interval=1d');
-    console.log('API endpoint for USD/JPY: /api/usd_jpy_data');
-    startPriceWatcher();
-    startCryptoPriceWatcher();
-  });
-}
-
-startServer();
+// =====================
+// Boot
+// =====================
+(async () => {
+  try {
+    await ensureTables();
+    startWatchers();
+    server.listen(PORT, () => {
+      console.log(`Server listening on :${PORT}`);
+    });
+  } catch (e) {
+    console.error('Failed to boot server:', e);
+    process.exit(1);
+  }
+})();

@@ -362,6 +362,12 @@ function refreshUsdJpyCrossHistoryUI() {
 }
 
 function updateBbValues(element, bb1, bb2) {
+  // ✅ BB非表示時は値UIも消す（残留値防止）
+  if (!areBollingerBandsVisible) {
+    if (element) element.innerHTML = '';
+    return;
+  }
+
   if (!element || !bb1 || !bb2 || bb1.length === 0 || bb2.length === 0) {
     if (element) element.innerHTML = '';
     return;
@@ -380,6 +386,12 @@ function updateBbValues(element, bb1, bb2) {
 }
 
 function updateEmaValues(element, emaDataArray, emaPeriods) {
+  // ✅ EMA非表示時は値UIも消す（残留値防止）
+  if (!areEmaVisible) {
+    if (element) element.innerHTML = '';
+    return;
+  }
+
   if (!element || !emaDataArray || emaDataArray.some((arr) => arr.length === 0)) {
     if (element) element.innerHTML = '';
     return;
@@ -419,6 +431,17 @@ function updateCrossHistoryDisplay(element, crossPrices) {
 
   element.style.boxSizing = 'border-box';
   element.style.minHeight = '72px';
+
+  // ✅ BB非表示中は「待機」ではなく「非表示中」表示にする
+  if (!areBollingerBandsVisible) {
+    element.innerHTML = `
+      <div class="indicator-group-title" style="margin-bottom:6px;font-weight:600;">
+        BBクロス履歴（${currentInterval}）
+      </div>
+      <div class="indicator-item"><span>BBは非表示中（クロス判定もしません）</span></div>
+    `;
+    return;
+  }
 
   const bands = ['upper2', 'upper1', 'middle', 'lower1', 'lower2'];
   const bandLabels = {
@@ -471,6 +494,17 @@ function updateEmaCrossHistoryDisplay(element, crossPrices) {
 
   element.style.boxSizing = 'border-box';
   element.style.minHeight = '72px';
+
+  // ✅ EMA非表示中は「待機」ではなく「非表示中」表示にする
+  if (!areEmaVisible) {
+    element.innerHTML = `
+      <div class="indicator-group-title" style="margin-bottom:6px;font-weight:600;">
+        EMAクロス履歴（${currentInterval}）
+      </div>
+      <div class="indicator-item"><span>EMAは非表示中（クロス判定もしません）</span></div>
+    `;
+    return;
+  }
 
   const emas = ['ema10', 'ema25', 'ema50'];
   const emaLabels = {
@@ -543,54 +577,74 @@ async function refreshChartData() {
 
       const closePrices = data.map((d) => d.close);
 
-      // Bollinger Bands
-      const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
-      const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
-      const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
-      const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
-
-      const bb1 = BollingerBands.calculate(bbInput1);
-      const bb2 = BollingerBands.calculate(bbInput2);
-
+      // ✅ BB（表示中のみ計算）
+      let bb1 = null;
+      let bb2 = null;
+      if (areBollingerBandsVisible) {
+        const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
+        const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
+        const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+        const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
+        bb1 = BollingerBands.calculate(bbInput1);
+        bb2 = BollingerBands.calculate(bbInput2);
+      }
       updateBbValues(chartObj.bbValuesElement, bb1, bb2);
 
-      // EMAs
-      const emaPeriods = [
-        { period: parseInt(ema1PeriodInput.value, 10) || 10, color: 'yellow' },
-        { period: parseInt(ema2PeriodInput.value, 10) || 25, color: 'yellow' },
-        { period: parseInt(ema3PeriodInput.value, 10) || 50, color: 'yellow' },
-      ];
+      // ✅ EMA（表示中のみ計算）
+      let emaPeriods = null;
+      let emaDataArray = null;
+      if (areEmaVisible) {
+        emaPeriods = [
+          { period: parseInt(ema1PeriodInput.value, 10) || 10, color: 'yellow' },
+          { period: parseInt(ema2PeriodInput.value, 10) || 25, color: 'yellow' },
+          { period: parseInt(ema3PeriodInput.value, 10) || 50, color: 'yellow' },
+        ];
 
-      const emaDataArray = emaPeriods.map(({ period }) => {
-        const emaInput = { period, values: closePrices, exact: false };
-        const ema = EMA.calculate(emaInput);
-        const emaOffset = data.length - ema.length;
-        return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
-      });
-
-      updateEmaValues(chartObj.emaValuesElement, emaDataArray, emaPeriods);
-
-      // Align BB with candles
-      const dataOffset = data.length - bb1.length;
-      const middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
-      const upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
-      const lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
-      const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
-      const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
-
-      chartObj.candleSeries.setData(data);
-      chartObj.middleBandSeries.setData(middleBandData);
-      chartObj.upperBand1Series.setData(upperBand1Data);
-      chartObj.lowerBand1Series.setData(lowerBand1Data);
-      chartObj.upperBand2Series.setData(upperBand2Data);
-      chartObj.lowerBand2Series.setData(lowerBand2Data);
-
-      if (chartObj.emaSeriesArray && chartObj.emaSeriesArray.length > 0) {
-        chartObj.emaSeriesArray.forEach((emaSeries, index) => {
-          emaSeries.setData(emaDataArray[index]);
+        emaDataArray = emaPeriods.map(({ period }) => {
+          const emaInput = { period, values: closePrices, exact: false };
+          const ema = EMA.calculate(emaInput);
+          const emaOffset = data.length - ema.length;
+          return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
         });
       }
+      updateEmaValues(chartObj.emaValuesElement, emaDataArray, emaPeriods);
 
+      // Candles always update
+      chartObj.candleSeries.setData(data);
+
+      // ✅ BB series update（表示中のみ）
+      if (areBollingerBandsVisible && bb1 && bb2 && bb1.length > 0 && bb2.length > 0) {
+        const dataOffset = data.length - bb1.length;
+        const middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
+        const upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+        const lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+        const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+        const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+
+        chartObj.middleBandSeries?.setData(middleBandData);
+        chartObj.upperBand1Series?.setData(upperBand1Data);
+        chartObj.lowerBand1Series?.setData(lowerBand1Data);
+        chartObj.upperBand2Series?.setData(upperBand2Data);
+        chartObj.lowerBand2Series?.setData(lowerBand2Data);
+      } else {
+        // 非表示時は空データにして残像防止（Seriesがある場合のみ）
+        chartObj.middleBandSeries?.setData([]);
+        chartObj.upperBand1Series?.setData([]);
+        chartObj.lowerBand1Series?.setData([]);
+        chartObj.upperBand2Series?.setData([]);
+        chartObj.lowerBand2Series?.setData([]);
+      }
+
+      // ✅ EMA series update（表示中のみ）
+      if (areEmaVisible && emaDataArray && chartObj.emaSeriesArray && chartObj.emaSeriesArray.length > 0) {
+        chartObj.emaSeriesArray.forEach((emaSeries, index) => {
+          emaSeries.setData(emaDataArray[index] || []);
+        });
+      } else if (chartObj.emaSeriesArray && chartObj.emaSeriesArray.length > 0) {
+        chartObj.emaSeriesArray.forEach((emaSeries) => emaSeries.setData([]));
+      }
+
+      // SMA(1) is always shown (cross判定の基準線でもある)
       const sma1Data = data.map((d) => ({ time: d.time, value: d.close }));
       if (chartObj.sma1Series) {
         chartObj.sma1Series.setData(sma1Data);
@@ -788,41 +842,61 @@ async function renderChartForTicker(ticker, interval) {
 
   const closePrices = data.map((d) => d.close);
 
-  const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
-  const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
-  const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
-  const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
-  const bb1 = BollingerBands.calculate(bbInput1);
-  const bb2 = BollingerBands.calculate(bbInput2);
+  // ✅ BB（表示中のみ計算）
+  let bb1 = null;
+  let bb2 = null;
+  if (areBollingerBandsVisible) {
+    const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
+    const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
+    const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+    const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
+    bb1 = BollingerBands.calculate(bbInput1);
+    bb2 = BollingerBands.calculate(bbInput2);
+  }
 
   const bbValuesElement = wrapper.querySelector(`#bb-values-${sanitizedTicker}`);
   updateBbValues(bbValuesElement, bb1, bb2);
 
-  const emaPeriods = [
-    { period: parseInt(ema1PeriodInput.value, 10) || 10, color: 'yellow' },
-    { period: parseInt(ema2PeriodInput.value, 10) || 25, color: 'yellow' },
-    { period: parseInt(ema3PeriodInput.value, 10) || 50, color: 'yellow' },
-  ];
+  // ✅ EMA（表示中のみ計算）
+  let emaPeriods = null;
+  let emaDataArray = null;
+  if (areEmaVisible) {
+    emaPeriods = [
+      { period: parseInt(ema1PeriodInput.value, 10) || 10, color: 'yellow' },
+      { period: parseInt(ema2PeriodInput.value, 10) || 25, color: 'yellow' },
+      { period: parseInt(ema3PeriodInput.value, 10) || 50, color: 'yellow' },
+    ];
 
-  const emaDataArray = emaPeriods.map(({ period }) => {
-    const emaInput = { period, values: closePrices, exact: false };
-    const ema = EMA.calculate(emaInput);
-    const emaOffset = data.length - ema.length;
-    return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
-  });
+    emaDataArray = emaPeriods.map(({ period }) => {
+      const emaInput = { period, values: closePrices, exact: false };
+      const ema = EMA.calculate(emaInput);
+      const emaOffset = data.length - ema.length;
+      return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
+    });
+  }
 
   const emaValuesElement = wrapper.querySelector(`#ema-values-${sanitizedTicker}`);
   updateEmaValues(emaValuesElement, emaDataArray, emaPeriods);
 
-  const dataOffset = data.length - bb1.length;
-  const middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
-  const upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
-  const lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
-  const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
-  const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+  // Align BB with candles（表示中のみ）
+  let middleBandData = [];
+  let upperBand1Data = [];
+  let lowerBand1Data = [];
+  let upperBand2Data = [];
+  let lowerBand2Data = [];
+
+  if (areBollingerBandsVisible && bb1 && bb2 && bb1.length > 0 && bb2.length > 0) {
+    const dataOffset = data.length - bb1.length;
+    middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
+    upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+    lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+    upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+    lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+  }
 
   const ohlcChart = createChart(wrapper.querySelector(`#ohlc-${sanitizedTicker}`));
 
+  // BB series（常に作るが、非表示時は空データ）
   const middleBandSeries = ohlcChart.addLineSeries({
     color: 'purple',
     lineWidth: 2,
@@ -880,7 +954,14 @@ async function renderChartForTicker(ticker, interval) {
   upperBand2Series.setData(upperBand2Data);
   lowerBand2Series.setData(lowerBand2Data);
 
-  const emaSeriesArray = emaPeriods.map((emaConfig, index) => {
+  // EMA series（常に作るが、非表示時は空データ）
+  const defaultEmaPeriods = [
+    { period: parseInt(ema1PeriodInput.value, 10) || 10, color: 'yellow' },
+    { period: parseInt(ema2PeriodInput.value, 10) || 25, color: 'yellow' },
+    { period: parseInt(ema3PeriodInput.value, 10) || 50, color: 'yellow' },
+  ];
+
+  const emaSeriesArray = defaultEmaPeriods.map((emaConfig, index) => {
     const emaSeries = ohlcChart.addLineSeries({
       color: emaConfig.color,
       lineWidth: 1,
@@ -891,7 +972,8 @@ async function renderChartForTicker(ticker, interval) {
       visible: areEmaVisible,
       priceFormat: PRICE_FORMAT_3DP,
     });
-    emaSeries.setData(emaDataArray[index]);
+    const d = (areEmaVisible && emaDataArray && emaDataArray[index]) ? emaDataArray[index] : [];
+    emaSeries.setData(d);
     return emaSeries;
   });
 
@@ -998,29 +1080,38 @@ async function renderChartForUsdJpy(interval) {
 
     const closePrices = data.map((d) => d.close);
 
-    const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
-    const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
-    const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
-    const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
-
-    const bb1 = BollingerBands.calculate(bbInput1);
-    const bb2 = BollingerBands.calculate(bbInput2);
+    // ✅ BB（表示中のみ計算）
+    let bb1 = null;
+    let bb2 = null;
+    if (areBollingerBandsVisible) {
+      const bbPeriod = parseInt(bbPeriodInput.value, 10) || 20;
+      const bbStdDev = parseFloat(bbStdDevInput.value) || 2;
+      const bbInput1 = { period: bbPeriod, values: closePrices, stdDev: 1 };
+      const bbInput2 = { period: bbPeriod, values: closePrices, stdDev: bbStdDev };
+      bb1 = BollingerBands.calculate(bbInput1);
+      bb2 = BollingerBands.calculate(bbInput2);
+    }
 
     const bbValuesElement = wrapper.querySelector('#bb-values-usdjpy');
     updateBbValues(bbValuesElement, bb1, bb2);
 
-    const emaPeriods = [
-      { period: parseInt(ema1PeriodInput.value, 10) || 10, color: 'yellow' },
-      { period: parseInt(ema2PeriodInput.value, 10) || 25, color: 'yellow' },
-      { period: parseInt(ema3PeriodInput.value, 10) || 50, color: 'yellow' },
-    ];
+    // ✅ EMA（表示中のみ計算）
+    let emaPeriods = null;
+    let emaDataArray = null;
+    if (areEmaVisible) {
+      emaPeriods = [
+        { period: parseInt(ema1PeriodInput.value, 10) || 10, color: 'yellow' },
+        { period: parseInt(ema2PeriodInput.value, 10) || 25, color: 'yellow' },
+        { period: parseInt(ema3PeriodInput.value, 10) || 50, color: 'yellow' },
+      ];
 
-    const emaDataArray = emaPeriods.map(({ period }) => {
-      const emaInput = { period, values: closePrices, exact: false };
-      const ema = EMA.calculate(emaInput);
-      const emaOffset = data.length - ema.length;
-      return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
-    });
+      emaDataArray = emaPeriods.map(({ period }) => {
+        const emaInput = { period, values: closePrices, exact: false };
+        const ema = EMA.calculate(emaInput);
+        const emaOffset = data.length - ema.length;
+        return ema.map((d, i) => ({ time: data[i + emaOffset].time, value: d }));
+      });
+    }
 
     const emaValuesElement = wrapper.querySelector('#ema-values-usdjpy');
     updateEmaValues(emaValuesElement, emaDataArray, emaPeriods);
@@ -1031,12 +1122,21 @@ async function renderChartForUsdJpy(interval) {
     const emaCrossHistoryElement = wrapper.querySelector('#ema-cross-history-usdjpy');
     updateEmaCrossHistoryDisplay(emaCrossHistoryElement, getEmaCrossMap(currentInterval));
 
-    const dataOffset = data.length - bb1.length;
-    const middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
-    const upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
-    const lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
-    const upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
-    const lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+    // Align BB with candles（表示中のみ）
+    let middleBandData = [];
+    let upperBand1Data = [];
+    let lowerBand1Data = [];
+    let upperBand2Data = [];
+    let lowerBand2Data = [];
+
+    if (areBollingerBandsVisible && bb1 && bb2 && bb1.length > 0 && bb2.length > 0) {
+      const dataOffset = data.length - bb1.length;
+      middleBandData = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.middle }));
+      upperBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+      lowerBand1Data = bb1.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+      upperBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.upper }));
+      lowerBand2Data = bb2.map((d, i) => ({ time: data[i + dataOffset].time, value: d.lower }));
+    }
 
     const usdJpyChart = createChart(wrapper.querySelector(`#usd-jpy-chart`));
 
@@ -1097,7 +1197,13 @@ async function renderChartForUsdJpy(interval) {
     upperBand2Series.setData(upperBand2Data);
     lowerBand2Series.setData(lowerBand2Data);
 
-    const emaSeriesArray = emaPeriods.map((emaConfig, index) => {
+    const defaultEmaPeriods = [
+      { period: parseInt(ema1PeriodInput.value, 10) || 10, color: 'yellow' },
+      { period: parseInt(ema2PeriodInput.value, 10) || 25, color: 'yellow' },
+      { period: parseInt(ema3PeriodInput.value, 10) || 50, color: 'yellow' },
+    ];
+
+    const emaSeriesArray = defaultEmaPeriods.map((emaConfig, index) => {
       const emaSeries = usdJpyChart.addLineSeries({
         color: emaConfig.color,
         lineWidth: 1,
@@ -1108,7 +1214,8 @@ async function renderChartForUsdJpy(interval) {
         visible: areEmaVisible,
         priceFormat: PRICE_FORMAT_3DP,
       });
-      emaSeries.setData(emaDataArray[index]);
+      const d = (areEmaVisible && emaDataArray && emaDataArray[index]) ? emaDataArray[index] : [];
+      emaSeries.setData(d);
       return emaSeries;
     });
 
@@ -1545,8 +1652,10 @@ async function loadUserSettings() {
           tickersInput.value = currentCryptoTicker;
         }
 
+        // ✅ ここが「ブラウザ閉じても保持」の核：DBの値で復元
         areBollingerBandsVisible = settings.areBollingerBandsVisible !== undefined ? settings.areBollingerBandsVisible : true;
         areEmaVisible = settings.areEmaVisible !== undefined ? settings.areEmaVisible : true;
+
         bbPeriodInput.value = settings.bbPeriod || '20';
         bbStdDevInput.value = settings.bbStdDev || '2';
         ema1PeriodInput.value = settings.ema1Period || '10';
@@ -1827,6 +1936,9 @@ function connectSocket() {
 
   // ===== USDJPY cross events =====
   socket.on('bb_cross', async (data) => {
+    // ✅ BB非表示ならイベントも無視（本来はサーバ側で判定しないが、二重ガード）
+    if (!areBollingerBandsVisible) return;
+
     console.log('BB Cross event received:', data);
     if (notificationElement) {
       notificationElement.textContent = data.message;
@@ -1846,6 +1958,9 @@ function connectSocket() {
   });
 
   socket.on('ema_cross', async (data) => {
+    // ✅ EMA非表示ならイベントも無視（二重ガード）
+    if (!areEmaVisible) return;
+
     console.log('EMA Cross event received:', data);
     if (notificationElement) {
       notificationElement.textContent = data.message;
@@ -1885,6 +2000,9 @@ function connectSocket() {
 
   // ===== ✅ crypto cross events（ドル円crossHistoryに混ぜない）=====
   socket.on('crypto_bb_cross', (data) => {
+    // ✅ BB非表示なら無視（二重ガード）
+    if (!areBollingerBandsVisible) return;
+
     console.log('CRYPTO BB Cross event received:', data);
     if (notificationElement) {
       notificationElement.textContent = data.message;
@@ -1895,6 +2013,9 @@ function connectSocket() {
   });
 
   socket.on('crypto_ema_cross', (data) => {
+    // ✅ EMA非表示なら無視（二重ガード）
+    if (!areEmaVisible) return;
+
     console.log('CRYPTO EMA Cross event received:', data);
     if (notificationElement) {
       notificationElement.textContent = data.message;
