@@ -336,7 +336,7 @@ function getDaysToFetchForInterval(interval) {
   }
 }
 
-// ユーザーごとの「監視対象 interval」を決定
+// ユーザーごとの「監視対象 interval」を決定（ドル円用）
 // ✅ x_values に設定がある interval は全て監視
 // ✅ 互換のため currentInterval も含める（UIで見ている足は従来通りクロス通知したい）
 function getUserMonitoredIntervals(settings) {
@@ -347,6 +347,26 @@ function getUserMonitoredIntervals(settings) {
   const x_values = settings?.x_values || {};
   if (x_values && typeof x_values === 'object') {
     for (const [iv, x] of Object.entries(x_values)) {
+      const n = Number(x);
+      if (Number.isFinite(n) && n > 0 && typeof iv === 'string' && iv) out.add(iv);
+    }
+  }
+
+  return [...out].filter((iv) => isValidInterval(iv));
+}
+
+// ✅ 追加：仮想通貨の「監視対象 interval」を決定（crypto_x_values を見る）
+// ✅ currentInterval も含める（UIで見ている足はクロス通知したい）
+function getUserMonitoredIntervalsForCrypto(settings, ticker) {
+  const out = new Set();
+  const currentInterval = settings?.currentInterval;
+  if (typeof currentInterval === 'string' && currentInterval) out.add(currentInterval);
+
+  const crypto_x_values = settings?.crypto_x_values || {};
+  const perTicker = crypto_x_values && typeof crypto_x_values === 'object' ? crypto_x_values[ticker] : null;
+
+  if (perTicker && typeof perTicker === 'object') {
+    for (const [iv, x] of Object.entries(perTicker)) {
       const n = Number(x);
       if (Number.isFinite(n) && n > 0 && typeof iv === 'string' && iv) out.add(iv);
     }
@@ -453,20 +473,19 @@ function aggregateQuotesToHours(quotes, intervalInHours) {
 }
 
 /**
- * ✅ watcher用：USDJPYの指定intervalのローソク足を取得（4h/8hは集約）
- * ✅ intervalごとにキャッシュ（CACHE_TTL）して無駄なYahoo呼び出しを減らす
+ * ✅ watcher用：指定ticker/intervalのローソク足を取得（4h/8hは集約）
+ * ✅ ticker/intervalごとにキャッシュ（CACHE_TTL）して無駄なYahoo呼び出しを減らす
  */
-async function fetchUsdJpyQuotesForWatcher(interval) {
+async function fetchQuotesForWatcher(ticker, interval) {
   const iv = String(interval || '');
   if (!isValidInterval(iv)) return null;
 
-  const cacheKey = `watcher-usdjpy-${iv}`;
+  const cacheKey = `watcher-${ticker}-${iv}`;
   const now = Date.now();
   if (cache[cacheKey] && now - cache[cacheKey].timestamp < CACHE_TTL) {
     return cache[cacheKey].data;
   }
 
-  const ticker = 'USDJPY=X';
   const daysToFetch = getDaysToFetchForInterval(iv);
   const period2 = new Date();
   const period1 = new Date(period2.getTime() - daysToFetch * 24 * 60 * 60 * 1000);
@@ -493,9 +512,7 @@ async function fetchUsdJpyQuotesForWatcher(interval) {
  * ✅ 追加：USD/JPY現在値を「quote → ダメなら chart」で取得
  * quote が 403/429 で落ちても watcher を止めないための仕組み
  */
-async function fetchUsdJpyCurrentPrice() {
-  const ticker = 'USDJPY=X';
-
+async function fetchCurrentPrice(ticker) {
   // ① quote（速いが弾かれやすい）
   try {
     const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(ticker)}`;
@@ -505,15 +522,15 @@ async function fetchUsdJpyCurrentPrice() {
     const text = await resp.text();
 
     if (!resp.ok) {
-      console.error(`Yahoo quote HTTP ${resp.status}: ${text.slice(0, 200)}`);
+      console.error(`Yahoo quote HTTP ${resp.status} for ${ticker}: ${text.slice(0, 200)}`);
     } else {
       const json = JSON.parse(text);
       const p = json?.quoteResponse?.result?.[0]?.regularMarketPrice;
       if (typeof p === 'number') return p;
-      console.error(`Yahoo quote OK but price missing: ${text.slice(0, 200)}`);
+      console.error(`Yahoo quote OK but price missing for ${ticker}: ${text.slice(0, 200)}`);
     }
   } catch (e) {
-    console.error('Yahoo quote fetch error:', e);
+    console.error(`Yahoo quote fetch error for ${ticker}:`, e);
   }
 
   // ② fallback：chart の最新 close を現在値扱い（通りやすい）
@@ -523,9 +540,9 @@ async function fetchUsdJpyCurrentPrice() {
     const quotes = await fetchYahooChartQuotes(ticker, '1m', period1, period2);
     const last = quotes[quotes.length - 1];
     if (last?.close != null) return last.close;
-    console.error('Yahoo chart fallback OK but last.close missing');
+    console.error(`Yahoo chart fallback OK but last.close missing for ${ticker}`);
   } catch (e) {
-    console.error('Yahoo chart fallback fetch error:', e);
+    console.error(`Yahoo chart fallback fetch error for ${ticker}:`, e);
   }
 
   return null;
@@ -840,8 +857,19 @@ app.post('/api/send-emails', async (req, res) => {
 // =====================
 //   Price Data APIs
 // =====================
+
+app.get('/api/crypto/tickers', async (req, res) => {
+  const hardcodedTickers = [
+    'ADA-USD', 'AVAX-USD', 'BCH-USD', 'BTC-USD', 'DOGE-USD', 'DOT-USD',
+    'ETH-USD', 'LINK-USD', 'LTC-USD', 'MATIC-USD', 'SOL-USD', 'UNI-USD', 'XRP-USD'
+  ].sort(); // Ensure it's always sorted
+
+  res.json(hardcodedTickers);
+});
+
 app.get('/api/data', async (req, res) => {
   const { ticker, interval } = req.query;
+  console.log(`Received request for /api/data: ticker=${ticker}, interval=${interval}`);
 
   if (!ticker || !interval) {
     return res.status(400).json({ error: 'Ticker and interval are required' });
@@ -928,10 +956,10 @@ app.get('/api/usd_jpy_data', async (req, res) => {
 });
 
 /**
- * ★ interval を引数で受け取り、メールに表示する
+ * ★ interval を引数で受け取り、メールに表示する（ドル円）
  */
 async function sendThresholdEmail(user, indicatorName, crossedPrice, currentPrice, crossedTimestamp, intervalForEmail, userThreshold) {
-  // ✅ 追加：ユーザーがメール受信OFFなら送らない
+  // ✅ ユーザーがメール受信OFFなら送らない
   try {
     const settings = user?.settings || {};
     if (settings.emailAlertsEnabled === false) {
@@ -995,7 +1023,6 @@ Parabolic Chart
     <p>Parabolic Chart</p>
   `;
 
-  // ✅ 追加：末尾にサイトを付ける
   const { text, html } = appendSiteBlockToMail(baseText, baseHtml);
 
   const mailOptions = {
@@ -1015,14 +1042,93 @@ Parabolic Chart
 }
 
 /**
- * ✅ クロス判定（終値＝SMA(1) と BB/EMA のクロス）
- * intervalLabel（=どの時間足で検知したか）を明示引数で受ける
- *
- * ✅ FIX: 同一ローソク（timestamp）での重複検知を防ぐ（15秒ループでのスパム対策）
- *   realTimeState.lastCrossTimestamps[interval][indicatorName] に最後に「検知したローソク足のtimestamp」を保存して、
- *   同じtimestampならスキップする
+ * ★ interval を引数で受け取り、メールに表示する（仮想通貨）
  */
-async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, intervalLabel) {
+async function sendCryptoThresholdEmail(user, ticker, indicatorName, crossedPrice, currentPrice, crossedTimestamp, intervalForEmail, userThreshold) {
+  try {
+    const settings = user?.settings || {};
+    if (settings.emailAlertsEnabled === false) {
+      console.log(`Email suppressed (emailAlertsEnabled=false) for user ${user?.id} (${user?.email}) for crypto ticker ${ticker}`);
+      return;
+    }
+  } catch {}
+
+  if (!transporter) {
+    console.error(`Email not sent for user ${user.email}: Email service is not configured.`);
+    return;
+  }
+
+  const priceDifference = Math.abs(currentPrice - crossedPrice);
+  const now = new Date();
+  const intervalLabel = intervalForEmail || 'unknown';
+  const indicatorLabel = getIndicatorDisplayName(indicatorName);
+
+  const subject = `【Parabolic】【${intervalLabel}】仮想通貨価格アラート (${ticker}): ${indicatorLabel} のしきい値達成`;
+  const baseText = `
+こんにちは、${user.username}さん
+
+仮想通貨 (${ticker}) の価格アラート条件が達成されました。
+
+---
+詳細
+---
+- 監視対象: ${ticker}
+- 時間足(間隔): ${intervalLabel}
+- トリガー指標: ${indicatorLabel}
+- クロス発生時刻: ${new Date(crossedTimestamp).toLocaleString('ja-JP')}
+- クロス時価格: ${crossedPrice.toFixed(8)}
+- 設定しきい値: ±${Number(userThreshold).toFixed(8)}
+- 現在時刻: ${now.toLocaleString('ja-JP')}
+- 現在価格: ${currentPrice.toFixed(8)}
+- クロス時からの変動幅: ${priceDifference.toFixed(8)}
+
+---
+
+Parabolic Chart
+`;
+
+  const baseHtml = `
+    <p>こんにちは、${user.username}さん</p>
+    <p>仮想通貨 (${ticker}) の価格アラート条件が達成されました。</p>
+    <hr>
+    <h3>詳細</h3>
+    <ul>
+      <li><b>監視対象:</b> ${ticker}</li>
+      <li><b>時間足(間隔):</b> ${intervalLabel}</li>
+      <li><b>トリガー指標:</b> ${indicatorLabel}</li>
+      <li><b>クロス発生時刻:</b> ${new Date(crossedTimestamp).toLocaleString('ja-JP')}</li>
+      <li><b>クロス時価格:</b> ${crossedPrice.toFixed(8)}</li>
+      <li><b>設定しきい値:</b> ±${Number(userThreshold).toFixed(8)}</li>
+      <li><b>現在時刻:</b> ${now.toLocaleString('ja-JP')}</li>
+      <li><b>現在価格:</b> ${currentPrice.toFixed(8)}</li>
+      <li><b>クロス時からの変動幅:</b> ${priceDifference.toFixed(8)}</li>
+    </ul>
+    <hr>
+    <p>Parabolic Chart</p>
+  `;
+
+  const { text, html } = appendSiteBlockToMail(baseText, baseHtml);
+
+  const mailOptions = {
+    from: `"Parabolic" <${gmailUserForFrom || process.env.GMAIL_USER}>`,
+    to: user.email,
+    subject,
+    text,
+    html,
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Crypto threshold alert email sent to ${user.email} for ${ticker} and ${indicatorName}.`);
+  } catch (error) {
+    console.error(`Failed to send crypto threshold alert email to ${user.email}:`, error);
+  }
+}
+
+/**
+ * ✅ クロス判定（終値＝SMA(1) と BB/EMA のクロス）ドル円
+ */
+async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, intervalLabel, assetDisplayName) {
   let stateChanged = false;
   const settings = user.settings || {};
   const userInterval = intervalLabel || settings.currentInterval || '5m';
@@ -1038,7 +1144,6 @@ async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, inte
     const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
     const bbStdDev = parseFloat(settings.bbStdDev) || 2;
 
-    // ===== FIX: EMA periodをユーザー設定と同期 =====
     const emaPeriods = [
       parseInt(settings.ema1Period, 10) || 10,
       parseInt(settings.ema2Period, 10) || 25,
@@ -1094,10 +1199,8 @@ async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, inte
           continue;
         }
 
-        // 記録
         realTimeState.lastCrossTimestamps[userInterval][indicatorName] = tsIso;
 
-        // v2: interval別に保存
         realTimeState.crossHistory[userInterval][indicatorName] = {
           price: crossPrice,
           timestamp: tsIso,
@@ -1108,14 +1211,14 @@ async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, inte
         const indicatorLabel = getIndicatorDisplayName(indicatorName);
 
         console.log(
-          `User ${user.id}: CLOSE(SMA1)-BASED cross detected for ${indicatorName}(${indicatorLabel}) at price ${crossPrice} on interval ${userInterval}`
+          `User ${user.id}: ${assetDisplayName} CLOSE(SMA1)-BASED cross detected for ${indicatorName}(${indicatorLabel}) at price ${crossPrice} on interval ${userInterval}`
         );
 
         const socketId = socketMap.get(user.id);
         if (socketId) {
           const eventName = indicatorName.startsWith('ema') ? 'ema_cross' : 'bb_cross';
           const eventPayload = {
-            message: `ドル円が ${indicatorLabel} を終値で${lastRelPosition === 'above' ? '上抜け' : '下抜け'}しました！ (間隔: ${userInterval})`,
+            message: `${assetDisplayName}が ${indicatorLabel} を終値で${lastRelPosition === 'above' ? '上抜け' : '下抜け'}しました！ (間隔: ${userInterval})`,
             price: crossPrice,
             crossDirection: lastRelPosition === 'above' ? 'up' : 'down',
             timestamp: tsIso,
@@ -1130,6 +1233,114 @@ async function monitorSma1Value(user, quotes, realTimeState, socketMap, io, inte
     }
   } catch (error) {
     console.error(`Error in monitorSma1Value for user ${user.id}:`, error);
+  }
+  return stateChanged;
+}
+
+/**
+ * ✅ クロス判定（終値＝SMA(1) と BB/EMA のクロス）仮想通貨
+ * ✅ FIX: イベント名を crypto_* にして、client側のドル円 crossHistory と混線しないようにする
+ */
+async function monitorSma1ValueForCrypto(user, quotes, realTimeState, socketMap, io, intervalLabel, assetDisplayName) {
+  let stateChanged = false;
+  const settings = user.settings || {};
+  const userInterval = intervalLabel || settings.currentInterval || '5m';
+
+  try {
+    const minDataPoints = 55;
+    if (!Array.isArray(quotes) || quotes.length < minDataPoints) return false;
+
+    const closePrices = quotes.map((q) => q.close);
+    const lastCandle = quotes[quotes.length - 1];
+    const secondLastCandle = quotes[quotes.length - 2];
+
+    const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
+    const bbStdDev = parseFloat(settings.bbStdDev) || 2;
+
+    const emaPeriods = [
+      parseInt(settings.ema1Period, 10) || 10,
+      parseInt(settings.ema2Period, 10) || 25,
+      parseInt(settings.ema3Period, 10) || 50,
+    ];
+
+    const indicatorValues = {};
+
+    const bbResult1 = BollingerBands.calculate({ period: bbPeriod, values: closePrices, stdDev: 1 });
+    const bbResult2 = BollingerBands.calculate({ period: bbPeriod, values: closePrices, stdDev: bbStdDev });
+
+    if (bbResult1.length >= 2 && bbResult2.length >= 2) {
+      indicatorValues['middle'] = { last: bbResult1[bbResult1.length - 1].middle, secondLast: bbResult1[bbResult1.length - 2].middle };
+      indicatorValues['upper1'] = { last: bbResult1[bbResult1.length - 1].upper, secondLast: bbResult1[bbResult1.length - 2].upper };
+      indicatorValues['lower1'] = { last: bbResult1[bbResult1.length - 1].lower, secondLast: bbResult1[bbResult1.length - 2].lower };
+      indicatorValues['upper2'] = { last: bbResult2[bbResult2.length - 1].upper, secondLast: bbResult2[bbResult2.length - 2].upper };
+      indicatorValues['lower2'] = { last: bbResult2[bbResult2.length - 1].lower, secondLast: bbResult2[bbResult2.length - 2].lower };
+    }
+
+    emaPeriods.forEach((p) => {
+      const emaResult = EMA.calculate({ period: p, values: closePrices });
+      if (emaResult.length >= 2) {
+        indicatorValues['ema' + p] = { last: emaResult[emaResult.length - 1], secondLast: emaResult[emaResult.length - 2] };
+      }
+    });
+
+    if (!realTimeState.cryptoCrossHistory) realTimeState.cryptoCrossHistory = {};
+    if (!realTimeState.cryptoCrossHistory[userInterval]) realTimeState.cryptoCrossHistory[userInterval] = {};
+
+    if (!realTimeState.cryptoLastCrossTimestamps) realTimeState.cryptoLastCrossTimestamps = {};
+    if (!realTimeState.cryptoLastCrossTimestamps[userInterval]) realTimeState.cryptoLastCrossTimestamps[userInterval] = {};
+
+    for (const indicatorName in indicatorValues) {
+      const { last, secondLast } = indicatorValues[indicatorName];
+      if (last === undefined || secondLast === undefined) continue;
+
+      const lastRelPosition = lastCandle.close > last ? 'above' : 'below';
+      const secondLastRelPosition = secondLastCandle.close > secondLast ? 'above' : 'below';
+
+      if (lastRelPosition !== secondLastRelPosition) {
+        const crossPrice = lastCandle.close;
+        const crossTimestamp = lastCandle.date;
+        const tsIso = crossTimestamp instanceof Date ? crossTimestamp.toISOString() : new Date(crossTimestamp).toISOString();
+
+        const lastSeenTs = realTimeState.cryptoLastCrossTimestamps[userInterval]?.[indicatorName];
+        if (lastSeenTs === tsIso) {
+          continue;
+        }
+
+        realTimeState.cryptoLastCrossTimestamps[userInterval][indicatorName] = tsIso;
+
+        realTimeState.cryptoCrossHistory[userInterval][indicatorName] = {
+          price: crossPrice,
+          timestamp: tsIso,
+          interval: userInterval,
+        };
+        stateChanged = true;
+
+        const indicatorLabel = getIndicatorDisplayName(indicatorName);
+
+        console.log(
+          `User ${user.id}: ${assetDisplayName} CRYPTO cross detected for ${indicatorName}(${indicatorLabel}) at price ${crossPrice} on interval ${userInterval}`
+        );
+
+        const socketId = socketMap.get(user.id);
+        if (socketId) {
+          const eventName = indicatorName.startsWith('ema') ? 'crypto_ema_cross' : 'crypto_bb_cross';
+          const eventPayload = {
+            ticker: assetDisplayName,
+            message: `${assetDisplayName}が ${indicatorLabel} を終値で${lastRelPosition === 'above' ? '上抜け' : '下抜け'}しました！ (間隔: ${userInterval})`,
+            price: crossPrice,
+            crossDirection: lastRelPosition === 'above' ? 'up' : 'down',
+            timestamp: tsIso,
+            interval: userInterval,
+            [eventName === 'crypto_ema_cross' ? 'emaName' : 'bandName']: indicatorName,
+            [eventName === 'crypto_ema_cross' ? 'emaValue' : 'bandValue']: last,
+            [eventName === 'crypto_ema_cross' ? 'emaLabel' : 'bandLabel']: indicatorLabel,
+          };
+          io.to(socketId).emit(eventName, eventPayload);
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`Error in monitorSma1ValueForCrypto for user ${user.id}:`, error);
   }
   return stateChanged;
 }
@@ -1159,7 +1370,7 @@ async function startPriceWatcher() {
         if (socket.userId) socketMap.set(socket.userId, socket.id);
       }
 
-      const currentPrice = await fetchUsdJpyCurrentPrice();
+      const currentPrice = await fetchCurrentPrice('USDJPY=X');
 
       if (currentPrice == null) {
         console.error('Failed to fetch current USD/JPY price (quote & chart both failed). Continuing without live price...');
@@ -1167,14 +1378,12 @@ async function startPriceWatcher() {
         io.emit('usd_jpy_price_update', { price: currentPrice, timestamp: new Date() });
       }
 
-      // ✅ ここが本題：ユーザーごとに「監視対象interval」を作り、必要なintervalのquotesをまとめて取る
       const perUserIntervals = new Map(); // userId -> [interval...]
       const allIntervals = new Set();
 
       for (const user of users) {
         const settings = user.settings || {};
         const intervals = getUserMonitoredIntervals(settings);
-        // 何も無い場合の保険
         const fallback = settings.currentInterval || '5m';
         const finalIntervals = intervals.length > 0 ? intervals : [fallback];
 
@@ -1182,11 +1391,10 @@ async function startPriceWatcher() {
         for (const iv of finalIntervals) allIntervals.add(iv);
       }
 
-      // intervalごとのquotesを一括取得（キャッシュも効く）
       const quotesByInterval = {};
       for (const iv of allIntervals) {
         try {
-          const q = await fetchUsdJpyQuotesForWatcher(iv);
+          const q = await fetchQuotesForWatcher('USDJPY=X', iv);
           if (Array.isArray(q) && q.length > 0) quotesByInterval[iv] = q;
         } catch (e) {
           console.error(`Watcher quotes fetch failed for interval ${iv}:`, e?.message || e);
@@ -1196,7 +1404,6 @@ async function startPriceWatcher() {
       for (const user of users) {
         const settings = user.settings || {};
         const realTimeState = settings.realTimeState || {};
-        // ✅ v2: crossHistory interval別に正規化（legacyも吸収）
         realTimeState.crossHistory = normalizeCrossHistoryToNested(realTimeState.crossHistory || {}, settings.currentInterval || '5m');
 
         let stateChanged = false;
@@ -1210,7 +1417,6 @@ async function startPriceWatcher() {
             if (!indicatorMap || typeof indicatorMap !== 'object') continue;
 
             const thresholdForInterval = Number(x_values[iv]);
-            // thresholdが無いintervalはスキップ（独立運用）
             if (!Number.isFinite(thresholdForInterval) || thresholdForInterval <= 0) continue;
 
             for (const [indicatorName, crossEvent] of Object.entries(indicatorMap)) {
@@ -1222,7 +1428,6 @@ async function startPriceWatcher() {
               if (priceDifference >= thresholdForInterval) {
                 const crossedTs = crossEvent.timestamp ? new Date(crossEvent.timestamp) : new Date();
 
-                // ✅ 追加：メール受信ON/OFF（未設定はON扱い）
                 const emailEnabled = settings.emailAlertsEnabled !== false;
 
                 if (emailEnabled) {
@@ -1233,11 +1438,9 @@ async function startPriceWatcher() {
                   );
                 }
 
-                // ✅ 重要：OFFでも crossHistory はクリア（永遠に判定し続けるのを防ぐ）
                 indicatorMap[indicatorName] = null;
                 stateChanged = true;
 
-                // ✅ clientに「消した」ことを通知してUI/LSも追従（OFFでも整合のため通知）
                 const socketId = socketMap.get(user.id);
                 if (socketId) {
                   io.to(socketId).emit('cross_history_cleared', {
@@ -1251,14 +1454,14 @@ async function startPriceWatcher() {
           }
         }
 
-        // Part 2: Cross-detection for ALL monitored intervals (x_values の interval 全部 + currentInterval)
+        // Part 2: Cross-detection for ALL monitored intervals
         const intervals = perUserIntervals.get(user.id) || [settings.currentInterval || '5m'];
 
         for (const iv of intervals) {
           const quotesForDetection = quotesByInterval[iv];
           if (!quotesForDetection) continue;
 
-          const crossDetectionStateChanged = await monitorSma1Value(user, quotesForDetection, realTimeState, socketMap, io, iv);
+          const crossDetectionStateChanged = await monitorSma1Value(user, quotesForDetection, realTimeState, socketMap, io, iv, 'USD/JPY');
           stateChanged = stateChanged || crossDetectionStateChanged;
         }
 
@@ -1279,6 +1482,159 @@ async function startPriceWatcher() {
   }, 15000);
 }
 
+async function startCryptoPriceWatcher() {
+  console.log('Starting DB-centric, always-on Crypto price watcher...');
+
+  let isTickRunning = false;
+
+  setInterval(async () => {
+    if (isTickRunning) return;
+    isTickRunning = true;
+
+    try {
+      const userQuery = `
+        SELECT u.id, u.username, u.email, s.settings
+        FROM users u
+        LEFT JOIN user_settings s ON u.id = s.user_id
+        WHERE s.settings IS NOT NULL AND s.settings->>'currentCryptoTicker' IS NOT NULL
+      `;
+      const { rows: users } = await pool.query(userQuery);
+      if (users.length === 0) return;
+
+      const activeSockets = await io.fetchSockets();
+      const socketMap = new Map();
+      for (const socket of activeSockets) {
+        if (socket.userId) socketMap.set(socket.userId, socket.id);
+      }
+
+      // Group users by their last saved ticker
+      const tickersToWatch = new Map();
+      for (const user of users) {
+        const ticker = user.settings?.currentCryptoTicker;
+        if (ticker) {
+          if (!tickersToWatch.has(ticker)) {
+            tickersToWatch.set(ticker, []);
+          }
+          tickersToWatch.get(ticker).push(user);
+        }
+      }
+
+      for (const [ticker, usersForTicker] of tickersToWatch.entries()) {
+        const currentPrice = await fetchCurrentPrice(ticker);
+
+        if (currentPrice != null) {
+          io.emit('price_update', { ticker, price: currentPrice, timestamp: new Date() });
+        }
+
+        const allIntervals = new Set();
+        for (const user of usersForTicker) {
+          // ✅ FIX: 仮想通貨は crypto_x_values を見て監視intervalを決める
+          const intervals = getUserMonitoredIntervalsForCrypto(user.settings, ticker);
+          const fallback = user.settings.currentInterval || '5m';
+          const finalIntervals = intervals.length > 0 ? intervals : [fallback];
+          for (const iv of finalIntervals) allIntervals.add(iv);
+        }
+
+        const quotesByInterval = {};
+        for (const iv of allIntervals) {
+          try {
+            const q = await fetchQuotesForWatcher(ticker, iv);
+            if (Array.isArray(q) && q.length > 0) quotesByInterval[iv] = q;
+          } catch (e) {
+            console.error(`Crypto Watcher quotes fetch failed for ${ticker} interval ${iv}:`, e?.message || e);
+          }
+        }
+
+        for (const user of usersForTicker) {
+          const settings = user.settings || {};
+          const realTimeState = settings.realTimeState || {};
+          realTimeState.cryptoCrossHistory = normalizeCrossHistoryToNested(realTimeState.cryptoCrossHistory || {}, settings.currentInterval || '5m');
+
+          let stateChanged = false;
+
+          if (currentPrice != null) {
+            const crypto_x_values = settings.crypto_x_values || {};
+            const thresholdsForTicker = crypto_x_values[ticker] || {};
+            const cryptoCrossHistory = realTimeState.cryptoCrossHistory || {};
+
+            for (const [iv, indicatorMap] of Object.entries(cryptoCrossHistory)) {
+              if (!indicatorMap || typeof indicatorMap !== 'object') continue;
+              const thresholdForInterval = Number(thresholdsForTicker[iv]);
+              if (!Number.isFinite(thresholdForInterval) || thresholdForInterval <= 0) continue;
+
+              for (const [indicatorName, crossEvent] of Object.entries(indicatorMap)) {
+                if (!crossEvent || !isCrossEventObject(crossEvent)) continue;
+
+                const priceDifference = Math.abs(currentPrice - crossEvent.price);
+                if (priceDifference >= thresholdForInterval) {
+                  await sendCryptoThresholdEmail(
+                    user,
+                    ticker,
+                    indicatorName,
+                    crossEvent.price,
+                    currentPrice,
+                    new Date(crossEvent.timestamp),
+                    iv,
+                    thresholdForInterval
+                  );
+
+                  indicatorMap[indicatorName] = null;
+                  stateChanged = true;
+
+                  // ✅ FIX: 仮想通貨は crypto_cross_history_cleared にする（ドル円UIを消さない）
+                  const socketId = socketMap.get(user.id);
+                  if (socketId) {
+                    io.to(socketId).emit('crypto_cross_history_cleared', {
+                      ticker,
+                      indicatorName,
+                      interval: iv,
+                      timestamp: new Date().toISOString(),
+                    });
+                  }
+                }
+              }
+            }
+          }
+
+          // ✅ FIX: 仮想通貨は crypto_x_values を見て監視intervalを決める
+          const userIntervals = getUserMonitoredIntervalsForCrypto(settings, ticker);
+          const fallback = settings.currentInterval || '5m';
+          const finalIntervals = userIntervals.length > 0 ? userIntervals : [fallback];
+
+          for (const iv of finalIntervals) {
+            const quotesForDetection = quotesByInterval[iv];
+            if (!quotesForDetection) continue;
+
+            const crossDetectionStateChanged = await monitorSma1ValueForCrypto(
+              user,
+              quotesForDetection,
+              realTimeState,
+              socketMap,
+              io,
+              iv,
+              ticker
+            );
+            stateChanged = stateChanged || crossDetectionStateChanged;
+          }
+
+          if (stateChanged) {
+            const newSettings = { ...settings, realTimeState };
+            const upsertQuery = `
+              INSERT INTO user_settings (user_id, settings) VALUES ($1, $2)
+              ON CONFLICT (user_id) DO UPDATE SET settings = $2
+            `;
+            await pool.query(upsertQuery, [user.id, newSettings]);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error in crypto price watcher:', error);
+    } finally {
+      isTickRunning = false;
+    }
+  }, 17000); // Offset slightly
+}
+
 // --- Server Startup ---
 async function startServer() {
   await configureNodemailer();
@@ -1295,6 +1651,7 @@ async function startServer() {
     console.log('API endpoint for stocks: /api/data?ticker=7203.T&interval=1d');
     console.log('API endpoint for USD/JPY: /api/usd_jpy_data');
     startPriceWatcher();
+    startCryptoPriceWatcher();
   });
 }
 

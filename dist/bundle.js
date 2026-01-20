@@ -10616,10 +10616,13 @@
   var tickersInput = document.getElementById("tickers-input");
   var intervalSelect = document.getElementById("interval-select");
   var startButton = document.getElementById("start-button");
+  var cryptoTickerListContainer = document.getElementById("crypto-ticker-list-container");
+  var cryptoTickerSelect = document.getElementById("crypto-ticker-select");
   var chartsContainer = document.getElementById("charts-container");
   var statusMessage = document.getElementById("status-message");
   var stockToggle = document.getElementById("stockToggle");
   var usdJpyToggle = document.getElementById("usdJpyToggle");
+  var cryptoToggle = document.getElementById("cryptoToggle");
   var tickersInputGroup = tickersInput.closest(".input-group");
   var toggleBbButton = document.getElementById("toggle-bb-button");
   var toggleEmaButton = document.getElementById("toggle-ema-button");
@@ -10654,6 +10657,9 @@
   var chartObjects = [];
   var updateIntervalId = null;
   var currentDataType = "stock";
+  var currentStockTicker = "7203";
+  var currentCryptoTicker = "BTC-USD";
+  var currentUserCryptoXValues = {};
   var currentInterval = "1d";
   var currentTickers = [];
   var areBollingerBandsVisible = true;
@@ -10669,6 +10675,27 @@
     if (!emailAlertToggle || !emailAlertToggleText)
       return;
     emailAlertToggleText.textContent = emailAlertToggle.checked ? "\u30E1\u30FC\u30EB\u53D7\u4FE1: ON" : "\u30E1\u30FC\u30EB\u53D7\u4FE1: OFF";
+  }
+  function setXValueUiEnabled(enabled) {
+    if (xValueInput)
+      xValueInput.disabled = !enabled;
+    if (saveXValueButton)
+      saveXValueButton.disabled = !enabled;
+    if (deleteXValueButton)
+      deleteXValueButton.disabled = !enabled;
+  }
+  function updateXValueContextLabel() {
+    if (!xValueLabel)
+      return;
+    if (currentDataType === "crypto") {
+      xValueLabel.textContent = `\u3057\u304D\u3044\u5024\uFF08\u4EEE\u60F3\u901A\u8CA8: ${currentCryptoTicker}\uFF09`;
+      return;
+    }
+    if (currentDataType === "usd_jpy") {
+      xValueLabel.textContent = "\u3057\u304D\u3044\u5024\uFF08USD/JPY\uFF09";
+      return;
+    }
+    xValueLabel.textContent = "\u3057\u304D\u3044\u5024\uFF08\u3053\u306E\u30BF\u30D6\u3067\u306F\u672A\u4F7F\u7528\uFF09";
   }
   function normalizeXValue(v2) {
     const n = Number(v2);
@@ -10750,8 +10777,7 @@
       return;
     const values = Object.values(sourceObj);
     const looksNested = values.some(
-      (v2) => v2 && typeof v2 === "object" && !normalizeCrossEvent(v2) && // v自体がeventでない
-      Object.values(v2).some((x2) => normalizeCrossEvent(x2))
+      (v2) => v2 && typeof v2 === "object" && !normalizeCrossEvent(v2) && Object.values(v2).some((x2) => normalizeCrossEvent(x2))
     );
     const looksFlat = values.some((v2) => normalizeCrossEvent(v2) !== null) || values.some((v2) => v2 === null);
     if (looksNested && !looksFlat) {
@@ -11020,13 +11046,13 @@
     element.innerHTML = content;
   }
   async function refreshChartData() {
-    statusMessage.textContent = `\u66F4\u65B0\u4E2D: ${currentDataType === "stock" ? currentTickers.join(", ") : "USD/JPY"} (${currentInterval}) - \u30C7\u30FC\u30BF\u53D6\u5F97\u4E2D...`;
+    statusMessage.textContent = `\u66F4\u65B0\u4E2D: ${currentDataType === "usd_jpy" ? "USD/JPY" : currentTickers.join(", ")} (${currentInterval}) - \u30C7\u30FC\u30BF\u53D6\u5F97\u4E2D...`;
     for (const chartObj of chartObjects) {
       if (!chartObj)
         continue;
       let data;
       try {
-        if (currentDataType === "stock") {
+        if (currentDataType === "stock" || currentDataType === "crypto") {
           data = await fetchStockData(chartObj.ticker, currentInterval);
         } else {
           data = await fetchUsdJpyData(chartObj.interval);
@@ -11086,7 +11112,7 @@
         statusMessage.textContent = `\u30A8\u30E9\u30FC: ${chartObj.ticker} \u306E\u30C7\u30FC\u30BF\u66F4\u65B0\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002`;
       }
     }
-    statusMessage.textContent = `\u8868\u793A\u4E2D: ${currentDataType === "stock" ? currentTickers.join(", ") : "USD/JPY"} (${currentInterval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
+    statusMessage.textContent = `\u8868\u793A\u4E2D: ${currentDataType === "usd_jpy" ? "USD/JPY" : currentTickers.join(", ")} (${currentInterval}) - 60\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
   }
   var stockIntervalOptions = [
     { value: "1m", text: "1\u5206" },
@@ -11100,6 +11126,17 @@
     { value: "1wk", text: "1\u9031\u9593" }
   ];
   var usdJpyIntervalOptions = [
+    { value: "1m", text: "1\u5206" },
+    { value: "5m", text: "5\u5206" },
+    { value: "15m", text: "15\u5206" },
+    { value: "30m", text: "30\u5206" },
+    { value: "1h", text: "1\u6642\u9593" },
+    { value: "4h", text: "4\u6642\u9593" },
+    { value: "8h", text: "8\u6642\u9593" },
+    { value: "1d", text: "\u65E5\u8DB3" },
+    { value: "1wk", text: "1\u9031\u9593" }
+  ];
+  var cryptoIntervalOptions = [
     { value: "1m", text: "1\u5206" },
     { value: "5m", text: "5\u5206" },
     { value: "15m", text: "15\u5206" },
@@ -11209,7 +11246,10 @@
     const wrapper = document.createElement("div");
     wrapper.className = "chart-wrapper";
     wrapper.innerHTML = `
-    <h2 class="chart-title">${ticker}</h2>
+    <h2 class="chart-title">
+      ${currentDataType === "crypto" ? `<a href="https://finance.yahoo.com/markets/crypto/all/" target="_blank" rel="noopener noreferrer" style="margin-right: 5px;">\u{1F517}</a>` : ""}
+      ${ticker}
+    </h2>
     <div class="chart-container" id="ohlc-${sanitizedTicker}"></div>
     <div class="current-price-values" id="current-price-${sanitizedTicker}"></div>
     <div class="bb-values" id="bb-values-${sanitizedTicker}"></div>
@@ -11566,6 +11606,11 @@
     return null;
   }
   async function start(dataType) {
+    if (dataType === "stock") {
+      currentStockTicker = tickersInput.value;
+    } else if (dataType === "crypto") {
+      currentCryptoTicker = String(tickersInput.value || "").split(",")[0].trim() || currentCryptoTicker;
+    }
     if (updateIntervalId)
       clearInterval(updateIntervalId);
     currentInterval = intervalSelect.value;
@@ -11574,6 +11619,7 @@
     usdJpyCurrentPrice = null;
     statusMessage.textContent = "\u30C1\u30E3\u30FC\u30C8\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059...";
     currentDataType = dataType;
+    updateXValueDisplay(currentInterval);
     if (dataType === "stock") {
       currentTickers = tickersInput.value.split(",").map((t) => t.trim()).filter((t) => t);
       currentInterval = intervalSelect.value;
@@ -11590,7 +11636,43 @@
       refreshUsdJpyCrossHistoryUI();
       statusMessage.textContent = `\u8868\u793A\u4E2D: USD/JPY (${currentInterval}) - 30\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
       updateIntervalId = setInterval(refreshChartData, 30 * 1e3);
+    } else if (dataType === "crypto") {
+      currentTickers = tickersInput.value.split(",").map((t) => t.trim()).filter((t) => t);
+      currentInterval = intervalSelect.value;
+      currentCryptoTicker = currentTickers[0] || currentCryptoTicker;
+      updateXValueDisplay(currentInterval);
+      await renderChartsForStocks(currentTickers, currentInterval);
+      statusMessage.textContent = `\u8868\u793A\u4E2D: ${currentTickers.join(", ")} (${currentInterval}) - 30\u79D2\u3054\u3068\u306B\u66F4\u65B0`;
+      updateIntervalId = setInterval(refreshChartData, 30 * 1e3);
     }
+  }
+  async function loadCryptoTickers() {
+    try {
+      const response = await fetch("/api/crypto/tickers");
+      if (!response.ok)
+        throw new Error("Failed to fetch tickers");
+      const tickers = await response.json();
+      cryptoTickerSelect.innerHTML = '<option value="">\u9298\u67C4\u3092\u9078\u629E...</option>';
+      tickers.forEach((ticker) => {
+        const option = document.createElement("option");
+        option.value = ticker;
+        option.textContent = ticker;
+        cryptoTickerSelect.appendChild(option);
+      });
+    } catch (error) {
+      console.error("Error loading crypto tickers:", error);
+      if (cryptoTickerListContainer)
+        cryptoTickerListContainer.classList.add("hidden");
+    }
+  }
+  if (cryptoTickerSelect) {
+    cryptoTickerSelect.addEventListener("change", () => {
+      if (cryptoTickerSelect.value) {
+        tickersInput.value = cryptoTickerSelect.value;
+        start(currentDataType);
+        updateXValueDisplay(intervalSelect.value);
+      }
+    });
   }
   window.addEventListener("resize", () => {
     chartObjects.forEach((obj) => resizeChartObject(obj));
@@ -11675,7 +11757,6 @@
       const response = await fetch(`/api/emails/${encodeURIComponent(email)}`, {
         method: "DELETE",
         credentials: "include"
-        // ✅ 別オリジン/セッション対策（同一オリジンでも害なし）
       });
       const result = await safeReadJson(response);
       if (response.ok) {
@@ -11691,10 +11772,7 @@
   }
   async function refreshEmailList() {
     try {
-      const response = await fetch("/api/emails", {
-        credentials: "include"
-        // ✅
-      });
+      const response = await fetch("/api/emails", { credentials: "include" });
       if (!response.ok) {
         const err = await safeReadJson(response);
         throw new Error(err?.error || `\u30E1\u30FC\u30EB\u4E00\u89A7\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002(HTTP ${response.status})`);
@@ -11755,8 +11833,14 @@
     currentDataType = "stock";
     stockToggle.classList.add("active");
     usdJpyToggle.classList.remove("active");
+    if (cryptoToggle)
+      cryptoToggle.classList.remove("active");
+    if (cryptoTickerListContainer)
+      cryptoTickerListContainer.classList.add("hidden");
     updateIntervalOptions(stockIntervalOptions, "1d");
     updateTickerInputVisibility();
+    tickersInput.closest(".input-group").querySelector("label").textContent = "\u9298\u67C4\u30B3\u30FC\u30C9";
+    tickersInput.value = currentStockTicker;
     currentInterval = intervalSelect.value;
     start(currentDataType);
     saveUserSettings();
@@ -11765,17 +11849,40 @@
     currentDataType = "usd_jpy";
     usdJpyToggle.classList.add("active");
     stockToggle.classList.remove("active");
+    if (cryptoToggle)
+      cryptoToggle.classList.remove("active");
+    if (cryptoTickerListContainer)
+      cryptoTickerListContainer.classList.add("hidden");
     updateIntervalOptions(usdJpyIntervalOptions, "1d");
     updateTickerInputVisibility();
     currentInterval = intervalSelect.value;
     start(currentDataType);
     saveUserSettings();
   });
+  if (cryptoToggle) {
+    cryptoToggle.addEventListener("click", () => {
+      currentDataType = "crypto";
+      cryptoToggle.classList.add("active");
+      stockToggle.classList.remove("active");
+      usdJpyToggle.classList.remove("active");
+      if (cryptoTickerListContainer)
+        cryptoTickerListContainer.classList.remove("hidden");
+      loadCryptoTickers();
+      updateIntervalOptions(cryptoIntervalOptions, "1d");
+      updateTickerInputVisibility();
+      tickersInput.closest(".input-group").querySelector("label").textContent = "\u901A\u8CA8\u30DA\u30A2";
+      tickersInput.value = currentCryptoTicker;
+      currentInterval = intervalSelect.value;
+      start(currentDataType);
+      saveUserSettings();
+    });
+  }
   async function saveUserSettings() {
     const settings = {
       currentDataType,
       currentInterval: intervalSelect.value,
-      tickersInput: tickersInput.value,
+      currentStockTicker,
+      currentCryptoTicker,
       areBollingerBandsVisible,
       areEmaVisible,
       bbPeriod: bbPeriodInput.value,
@@ -11783,20 +11890,22 @@
       ema1Period: ema1PeriodInput.value,
       ema2Period: ema2PeriodInput.value,
       ema3Period: ema3PeriodInput.value,
-      // ✅ 追加：メール受信ON/OFF（未ログイン等で要素が無い場合はtrue扱い）
       emailAlertsEnabled: emailAlertToggle ? !!emailAlertToggle.checked : true,
-      // ✅ ここが重要：掃除した x_values だけ送る（消したものが復活しない）
-      x_values: buildCleanXValues()
+      x_values: buildCleanXValues(),
+      // USDJPY thresholds
+      crypto_x_values: currentUserCryptoXValues
+      // ✅ crypto thresholds: { [ticker]: { [interval]: number } }
     };
     try {
       const response = await fetch("/api/user/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(settings)
-        // ✅ server側はトップレベル想定（互換はserverで吸収）
       });
-      if (!response.ok)
-        console.error("Failed to save user settings.");
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        console.error("Failed to save user settings.", errorData.error || "");
+      }
     } catch (error) {
       console.error("Network error saving user settings:", error);
     }
@@ -11812,10 +11921,17 @@
           applyCrossHistoryFromServer(settings.realTimeState?.crossHistory);
           currentUserXValues = settings.x_values && typeof settings.x_values === "object" ? settings.x_values : {};
           currentUserXValues = buildCleanXValues();
+          currentUserCryptoXValues = settings.crypto_x_values || {};
           currentDataType = settings.currentDataType || "stock";
-          intervalSelect.value = settings.currentInterval || "1d";
-          currentInterval = intervalSelect.value;
-          tickersInput.value = settings.tickersInput || "7203";
+          currentInterval = settings.currentInterval || "1d";
+          intervalSelect.value = currentInterval;
+          currentStockTicker = settings.currentStockTicker || "7203";
+          currentCryptoTicker = settings.currentCryptoTicker || "BTC-USD";
+          if (currentDataType === "stock") {
+            tickersInput.value = currentStockTicker;
+          } else if (currentDataType === "crypto") {
+            tickersInput.value = currentCryptoTicker;
+          }
           areBollingerBandsVisible = settings.areBollingerBandsVisible !== void 0 ? settings.areBollingerBandsVisible : true;
           areEmaVisible = settings.areEmaVisible !== void 0 ? settings.areEmaVisible : true;
           bbPeriodInput.value = settings.bbPeriod || "20";
@@ -11831,10 +11947,29 @@
           if (currentDataType === "stock") {
             stockToggle.classList.add("active");
             usdJpyToggle.classList.remove("active");
+            if (cryptoToggle)
+              cryptoToggle.classList.remove("active");
+            if (cryptoTickerListContainer)
+              cryptoTickerListContainer.classList.add("hidden");
             updateIntervalOptions(stockIntervalOptions, intervalSelect.value);
+            tickersInput.closest(".input-group").querySelector("label").textContent = "\u9298\u67C4\u30B3\u30FC\u30C9";
+          } else if (currentDataType === "crypto") {
+            if (cryptoToggle)
+              cryptoToggle.classList.add("active");
+            stockToggle.classList.remove("active");
+            usdJpyToggle.classList.remove("active");
+            if (cryptoTickerListContainer)
+              cryptoTickerListContainer.classList.remove("hidden");
+            loadCryptoTickers();
+            updateIntervalOptions(cryptoIntervalOptions, intervalSelect.value);
+            tickersInput.closest(".input-group").querySelector("label").textContent = "\u901A\u8CA8\u30DA\u30A2";
           } else {
             usdJpyToggle.classList.add("active");
             stockToggle.classList.remove("active");
+            if (cryptoToggle)
+              cryptoToggle.classList.remove("active");
+            if (cryptoTickerListContainer)
+              cryptoTickerListContainer.classList.add("hidden");
             updateIntervalOptions(usdJpyIntervalOptions, intervalSelect.value);
           }
           updateTickerInputVisibility();
@@ -11856,9 +11991,24 @@
   function updateXValueDisplay(interval) {
     if (xValueControls.classList.contains("hidden"))
       return;
+    updateXValueContextLabel();
+    const supported = currentDataType === "usd_jpy" || currentDataType === "crypto";
+    if (!supported) {
+      setXValueUiEnabled(false);
+      xValueIntervalLabel.textContent = interval;
+      currentXValueSpan.textContent = "\u3053\u306E\u30BF\u30D6\u3067\u306F\u3057\u304D\u3044\u5024\u306F\u4F7F\u7528\u3057\u307E\u305B\u3093";
+      xValueInput.value = "";
+      return;
+    }
+    setXValueUiEnabled(true);
     const iv = interval;
     xValueIntervalLabel.textContent = iv;
-    const v2 = getXValueForInterval(iv);
+    let v2 = null;
+    if (currentDataType === "crypto") {
+      v2 = currentUserCryptoXValues?.[currentCryptoTicker]?.[iv];
+    } else {
+      v2 = getXValueForInterval(iv);
+    }
     if (v2 == null) {
       currentXValueSpan.textContent = "\u73FE\u5728\u306E\u5024: \u672A\u8A2D\u5B9A";
       xValueInput.value = "";
@@ -11904,6 +12054,7 @@
         latestCrossPricesByInterval = {};
         latestEmaCrossPricesByInterval = {};
         currentUserXValues = {};
+        currentUserCryptoXValues = {};
         clearCrossHistoryLocalStorage();
         if (emailAlertToggleContainer)
           emailAlertToggleContainer.classList.add("hidden");
@@ -11921,6 +12072,7 @@
       latestCrossPricesByInterval = {};
       latestEmaCrossPricesByInterval = {};
       currentUserXValues = {};
+      currentUserCryptoXValues = {};
       clearCrossHistoryLocalStorage();
       if (emailAlertToggleContainer)
         emailAlertToggleContainer.classList.add("hidden");
@@ -11946,6 +12098,7 @@
         latestCrossPricesByInterval = {};
         latestEmaCrossPricesByInterval = {};
         currentUserXValues = {};
+        currentUserCryptoXValues = {};
         xValueControls.classList.add("hidden");
         if (emailAlertToggleContainer)
           emailAlertToggleContainer.classList.add("hidden");
@@ -11962,35 +12115,58 @@
   saveXValueButton.addEventListener("click", () => {
     const iv = intervalSelect.value;
     const raw = String(xValueInput.value ?? "").trim();
-    if (raw === "") {
-      if (hasOwn(currentUserXValues, iv))
-        delete currentUserXValues[iv];
-      updateXValueDisplay(iv);
-      saveUserSettings();
-      return;
-    }
     const n = normalizeXValue(raw);
-    if (n == null) {
+    if (raw !== "" && n == null) {
       alert("0\u3088\u308A\u5927\u304D\u3044\u6570\u5024\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002\uFF08\u7A7A\u6B04\u306F\u524A\u9664\u306B\u306A\u308A\u307E\u3059\uFF09");
       return;
     }
-    currentUserXValues[iv] = n;
+    if (currentDataType === "crypto") {
+      if (!currentUserCryptoXValues[currentCryptoTicker])
+        currentUserCryptoXValues[currentCryptoTicker] = {};
+      if (n == null) {
+        delete currentUserCryptoXValues[currentCryptoTicker][iv];
+      } else {
+        currentUserCryptoXValues[currentCryptoTicker][iv] = n;
+      }
+    } else {
+      if (n == null) {
+        delete currentUserXValues[iv];
+      } else {
+        currentUserXValues[iv] = n;
+      }
+    }
     updateXValueDisplay(iv);
     saveUserSettings();
   });
   xValueInput.addEventListener("blur", () => {
     const iv = intervalSelect.value;
     const raw = String(xValueInput.value ?? "").trim();
-    if (raw === "" && hasOwn(currentUserXValues, iv)) {
-      delete currentUserXValues[iv];
-      updateXValueDisplay(iv);
-      saveUserSettings();
+    if (raw === "") {
+      if (currentDataType === "crypto") {
+        if (currentUserCryptoXValues?.[currentCryptoTicker]?.[iv]) {
+          delete currentUserCryptoXValues[currentCryptoTicker][iv];
+          updateXValueDisplay(iv);
+          saveUserSettings();
+        }
+      } else {
+        if (hasOwn(currentUserXValues, iv)) {
+          delete currentUserXValues[iv];
+          updateXValueDisplay(iv);
+          saveUserSettings();
+        }
+      }
     }
   });
   deleteXValueButton.addEventListener("click", () => {
     const iv = intervalSelect.value;
-    if (hasOwn(currentUserXValues, iv)) {
-      delete currentUserXValues[iv];
+    if (currentDataType === "crypto") {
+      if (currentUserCryptoXValues?.[currentCryptoTicker]?.[iv]) {
+        delete currentUserCryptoXValues[currentCryptoTicker][iv];
+      }
+    } else {
+      if (hasOwn(currentUserXValues, iv)) {
+        delete currentUserXValues[iv];
+      }
     }
     xValueInput.value = "";
     updateXValueDisplay(iv);
@@ -12058,6 +12234,25 @@
       } catch (e2) {
         console.warn("Failed to apply cross_history_cleared:", e2);
       }
+    });
+    socket.on("crypto_bb_cross", (data) => {
+      console.log("CRYPTO BB Cross event received:", data);
+      if (notificationElement) {
+        notificationElement.textContent = data.message;
+        notificationElement.classList.remove("hidden");
+        setTimeout(() => notificationElement?.classList.add("hidden"), 5e3);
+      }
+    });
+    socket.on("crypto_ema_cross", (data) => {
+      console.log("CRYPTO EMA Cross event received:", data);
+      if (notificationElement) {
+        notificationElement.textContent = data.message;
+        notificationElement.classList.remove("hidden");
+        setTimeout(() => notificationElement?.classList.add("hidden"), 5e3);
+      }
+    });
+    socket.on("crypto_cross_history_cleared", (data) => {
+      console.log("CRYPTO cross history cleared:", data);
     });
     socket.on("usd_jpy_price_update", (data) => {
       usdJpyCurrentPrice = data.price;

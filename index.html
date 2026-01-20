@@ -35,6 +35,7 @@
                     <div id="chart-type-toggle" class="toggle-buttons">
                         <button id="stockToggle" class="toggle-button active">株価</button>
                         <button id="usdJpyToggle" class="toggle-button">ドル円</button>
+                        <button id="cryptoToggle" class="toggle-button">仮想通貨</button>
                     </div>
                 </div>
             </div>
@@ -43,6 +44,10 @@
                     <div class="input-group">
                         <label for="tickers-input">銘柄コード</label>
                         <input type="text" id="tickers-input" class="form-input" value="7203">
+                    </div>
+                    <div id="crypto-ticker-list-container" class="input-group hidden">
+                        <label for="crypto-ticker-select">銘柄一覧</label>
+                        <select id="crypto-ticker-select" class="form-select"></select>
                     </div>
                     <div class="input-group">
                         <label for="interval-select">間隔</label>

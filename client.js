@@ -7,10 +7,13 @@ import { io } from 'socket.io-client';
 const tickersInput = document.getElementById('tickers-input');
 const intervalSelect = document.getElementById('interval-select');
 const startButton = document.getElementById('start-button');
+const cryptoTickerListContainer = document.getElementById('crypto-ticker-list-container');
+const cryptoTickerSelect = document.getElementById('crypto-ticker-select');
 const chartsContainer = document.getElementById('charts-container');
 const statusMessage = document.getElementById('status-message');
 const stockToggle = document.getElementById('stockToggle');
 const usdJpyToggle = document.getElementById('usdJpyToggle');
+const cryptoToggle = document.getElementById('cryptoToggle');
 const tickersInputGroup = tickersInput.closest('.input-group');
 const toggleBbButton = document.getElementById('toggle-bb-button');
 const toggleEmaButton = document.getElementById('toggle-ema-button');
@@ -52,7 +55,10 @@ const deleteXValueButton = document.getElementById('delete-x-value-button');
 // --- Global State ---
 let chartObjects = []; // holds all chart instances and their series for updates
 let updateIntervalId = null;
-let currentDataType = 'stock'; // 'stock' or 'usd_jpy'
+let currentDataType = 'stock'; // 'stock' or 'usd_jpy' or 'crypto'
+let currentStockTicker = '7203';
+let currentCryptoTicker = 'BTC-USD';
+let currentUserCryptoXValues = {};
 let currentInterval = '1d';
 let currentTickers = [];
 let areBollingerBandsVisible = true;
@@ -60,11 +66,11 @@ let areEmaVisible = true;
 let currentUserEmail = null;
 
 // ✅ intervalごとに保持（独立運用）
-let latestCrossPricesByInterval = {}; // { [interval]: { upper2: {price,interval,timestamp}|null, ... } }
-let latestEmaCrossPricesByInterval = {}; // { [interval]: { ema10: {price,interval,timestamp}|null, ... } }
+let latestCrossPricesByInterval = {}; // USDJPY BB: { [interval]: { upper2: {price,interval,timestamp}|null, ... } }
+let latestEmaCrossPricesByInterval = {}; // USDJPY EMA: { [interval]: { ema10: {price,interval,timestamp}|null, ... } }
 
 let usdJpyCurrentPrice = null;
-let currentUserXValues = {}; // Maps interval to x_value, e.g., {"1h": 0.5, "4h": 1.0}
+let currentUserXValues = {}; // USDJPY thresholds by interval
 let socket = null;
 
 /**
@@ -76,6 +82,31 @@ const formatValue = (value) => Number(value).toFixed(3);
 function updateEmailAlertToggleUI() {
   if (!emailAlertToggle || !emailAlertToggleText) return;
   emailAlertToggleText.textContent = emailAlertToggle.checked ? 'メール受信: ON' : 'メール受信: OFF';
+}
+
+/**
+ * ✅ FIX: X値UIがタブ切替で「前の値を保持してしまう」事故を防ぐ
+ * - どのタブで何のしきい値を編集しているかを明示
+ * - stockタブではX値UIを無効化（誤保存防止）
+ */
+function setXValueUiEnabled(enabled) {
+  if (xValueInput) xValueInput.disabled = !enabled;
+  if (saveXValueButton) saveXValueButton.disabled = !enabled;
+  if (deleteXValueButton) deleteXValueButton.disabled = !enabled;
+}
+
+function updateXValueContextLabel() {
+  if (!xValueLabel) return;
+
+  if (currentDataType === 'crypto') {
+    xValueLabel.textContent = `しきい値（仮想通貨: ${currentCryptoTicker}）`;
+    return;
+  }
+  if (currentDataType === 'usd_jpy') {
+    xValueLabel.textContent = 'しきい値（USD/JPY）';
+    return;
+  }
+  xValueLabel.textContent = 'しきい値（このタブでは未使用）';
 }
 
 // =========================
@@ -111,14 +142,11 @@ try {
 } catch {}
 
 // ✅ 縦軸(価格軸)を小数第3位固定にするための設定
-// Lightweight Charts は series ごとの priceFormat が価格目盛り/クロスヘア表示に効きます
 const PRICE_FORMAT_3DP = { type: 'price', precision: 3, minMove: 0.001 };
 
 // =========================
-// Cross history persistence
+// Cross history persistence (USDJPY only)
 // =========================
-// ✅ ブラウザを閉じてもクロス履歴を残す（localStorage）
-// ✅ さらにサーバ(DB: user_settings.realTimeState.crossHistory) から復元して確実にする
 let lsKeySuffix = 'guest';
 const LS_KEY_BB_CROSS = () => `parabolic_bb_cross_prices_v2_${lsKeySuffix}`;
 const LS_KEY_EMA_CROSS = () => `parabolic_ema_cross_prices_v2_${lsKeySuffix}`;
@@ -134,7 +162,6 @@ function safeParseJson(str) {
 // =========================
 // Cross event shape helpers
 // =========================
-// 旧: { upper2: 150.123 } のように number を保存していた互換も吸収する
 function normalizeCrossEvent(v) {
   if (v == null) return null;
   if (typeof v === 'number' && !Number.isNaN(v)) {
@@ -181,14 +208,13 @@ function ingestCrossHistoryObjectToByInterval(sourceObj, targetByInterval) {
       (v) =>
         v &&
         typeof v === 'object' &&
-        !normalizeCrossEvent(v) && // v自体がeventでない
+        !normalizeCrossEvent(v) &&
         Object.values(v).some((x) => normalizeCrossEvent(x))
     );
 
   const looksFlat =
     values.some((v) => normalizeCrossEvent(v) !== null) || values.some((v) => v === null);
 
-  // nested: { "1h": { upper2: {...}, ... }, "5m": {...} }
   if (looksNested && !looksFlat) {
     for (const [intervalKey, map] of Object.entries(sourceObj)) {
       if (!map || typeof map !== 'object') continue;
@@ -201,7 +227,6 @@ function ingestCrossHistoryObjectToByInterval(sourceObj, targetByInterval) {
     return;
   }
 
-  // flat legacy: { upper2: {...}, ema10: {...}, ... }
   const fallbackInterval = currentInterval || intervalSelect?.value || 'unknown';
   for (const [name, ev] of Object.entries(sourceObj)) {
     if (ev === null) {
@@ -245,15 +270,12 @@ function clearCrossHistoryLocalStorage() {
   }
 }
 
-// server(DB)に保存されている crossHistory を client 用の形に反映（interval別に吸収）
+// server(DB)に保存されている crossHistory を client 用の形に反映（USDJPYのみ）
 function applyCrossHistoryFromServer(crossHistory) {
   if (!crossHistory || typeof crossHistory !== 'object') return;
 
-  // serverは v2で nested 想定：{ "5m": {upper2:{...}}, "1h": {...} }
-  // ただし旧データ(flat)も来る可能性があるので ingest 関数に通す
-  ingestCrossHistoryObjectToByInterval(crossHistory, latestCrossPricesByInterval); // ここはBB/EMA混在でも一旦入る
-  // ↑ ただし上はBB/EMA仕分けしないので、以下で再仕分けする（混在入力対応）
-  // いったん退避
+  ingestCrossHistoryObjectToByInterval(crossHistory, latestCrossPricesByInterval);
+
   const mixed = latestCrossPricesByInterval;
   latestCrossPricesByInterval = {};
   latestEmaCrossPricesByInterval = {};
@@ -318,10 +340,6 @@ function aggregateCandleData(data, targetInterval) {
   return aggregatedData;
 }
 
-/**
- * ===== FIX: chart resize helper
- * DOM更新でコンテナサイズが変わっても、Lightweight Chartsは自動追従しないので明示的にresizeする。
- */
 function resizeChartObject(chartObj) {
   if (!chartObj || !chartObj.chart || !chartObj.container) return;
   const w = chartObj.container.clientWidth;
@@ -343,9 +361,6 @@ function refreshUsdJpyCrossHistoryUI() {
   requestAnimationFrame(() => resizeChartObject(usdJpyChartObj));
 }
 
-/**
- * Updates the content of an element to display the latest Bollinger Band values.
- */
 function updateBbValues(element, bb1, bb2) {
   if (!element || !bb1 || !bb2 || bb1.length === 0 || bb2.length === 0) {
     if (element) element.innerHTML = '';
@@ -364,9 +379,6 @@ function updateBbValues(element, bb1, bb2) {
   `;
 }
 
-/**
- * Updates the content of an element to display the latest EMA values.
- */
 function updateEmaValues(element, emaDataArray, emaPeriods) {
   if (!element || !emaDataArray || emaDataArray.some((arr) => arr.length === 0)) {
     if (element) element.innerHTML = '';
@@ -382,9 +394,6 @@ function updateEmaValues(element, emaDataArray, emaPeriods) {
   `;
 }
 
-/**
- * Updates current price display.
- */
 function updateCurrentPriceValue(element, data) {
   if (!element || !data || data.length === 0) {
     if (element) element.innerHTML = '';
@@ -405,13 +414,9 @@ function updateCurrentPriceValue(element, data) {
   `;
 }
 
-/**
- * ===== FIX: Layout-stable BB cross history renderer (grid + nowrap)
- */
 function updateCrossHistoryDisplay(element, crossPrices) {
   if (!element) return;
 
-  // ensure stable block sizing
   element.style.boxSizing = 'border-box';
   element.style.minHeight = '72px';
 
@@ -461,9 +466,6 @@ function updateCrossHistoryDisplay(element, crossPrices) {
   element.innerHTML = content;
 }
 
-/**
- * ===== FIX: Layout-stable EMA cross history renderer (grid + nowrap)
- */
 function updateEmaCrossHistoryDisplay(element, crossPrices) {
   if (!element) return;
 
@@ -514,12 +516,9 @@ function updateEmaCrossHistoryDisplay(element, crossPrices) {
   element.innerHTML = content;
 }
 
-/**
- * Refreshes data for all active charts and updates their series.
- */
 async function refreshChartData() {
   statusMessage.textContent = `更新中: ${
-    currentDataType === 'stock' ? currentTickers.join(', ') : 'USD/JPY'
+    currentDataType === 'usd_jpy' ? 'USD/JPY' : currentTickers.join(', ')
   } (${currentInterval}) - データ取得中...`;
 
   for (const chartObj of chartObjects) {
@@ -527,7 +526,7 @@ async function refreshChartData() {
 
     let data;
     try {
-      if (currentDataType === 'stock') {
+      if (currentDataType === 'stock' || currentDataType === 'crypto') {
         data = await fetchStockData(chartObj.ticker, currentInterval);
       } else {
         data = await fetchUsdJpyData(chartObj.interval);
@@ -592,13 +591,11 @@ async function refreshChartData() {
         });
       }
 
-      // SMA(1) = close
       const sma1Data = data.map((d) => ({ time: d.time, value: d.close }));
       if (chartObj.sma1Series) {
         chartObj.sma1Series.setData(sma1Data);
       }
 
-      // ===== FIX: if DOM metrics changed subtly, keep chart fitted
       resizeChartObject(chartObj);
     } catch (error) {
       console.error(`Failed to refresh data for ${chartObj.ticker}:`, error);
@@ -607,7 +604,7 @@ async function refreshChartData() {
   }
 
   statusMessage.textContent = `表示中: ${
-    currentDataType === 'stock' ? currentTickers.join(', ') : 'USD/JPY'
+    currentDataType === 'usd_jpy' ? 'USD/JPY' : currentTickers.join(', ')
   } (${currentInterval}) - 60秒ごとに更新`;
 }
 
@@ -625,6 +622,18 @@ const stockIntervalOptions = [
 ];
 
 const usdJpyIntervalOptions = [
+  { value: '1m', text: '1分' },
+  { value: '5m', text: '5分' },
+  { value: '15m', text: '15分' },
+  { value: '30m', text: '30分' },
+  { value: '1h', text: '1時間' },
+  { value: '4h', text: '4時間' },
+  { value: '8h', text: '8時間' },
+  { value: '1d', text: '日足' },
+  { value: '1wk', text: '1週間' },
+];
+
+const cryptoIntervalOptions = [
   { value: '1m', text: '1分' },
   { value: '5m', text: '5分' },
   { value: '15m', text: '15分' },
@@ -752,7 +761,10 @@ async function renderChartForTicker(ticker, interval) {
   const wrapper = document.createElement('div');
   wrapper.className = 'chart-wrapper';
   wrapper.innerHTML = `
-    <h2 class="chart-title">${ticker}</h2>
+    <h2 class="chart-title">
+      ${currentDataType === 'crypto' ? `<a href="https://finance.yahoo.com/markets/crypto/all/" target="_blank" rel="noopener noreferrer" style="margin-right: 5px;">🔗</a>` : ''}
+      ${ticker}
+    </h2>
     <div class="chart-container" id="ohlc-${sanitizedTicker}"></div>
     <div class="current-price-values" id="current-price-${sanitizedTicker}"></div>
     <div class="bb-values" id="bb-values-${sanitizedTicker}"></div>
@@ -1013,7 +1025,6 @@ async function renderChartForUsdJpy(interval) {
     const emaValuesElement = wrapper.querySelector('#ema-values-usdjpy');
     updateEmaValues(emaValuesElement, emaDataArray, emaPeriods);
 
-    // ✅ interval別の履歴を表示（現在選択interval）
     const crossHistoryElement = wrapper.querySelector('#cross-history-usdjpy');
     updateCrossHistoryDisplay(crossHistoryElement, getBbCrossMap(currentInterval));
 
@@ -1154,17 +1165,26 @@ async function renderChartForUsdJpy(interval) {
  * Main function to start/update the charting process.
  */
 async function start(dataType) {
+  if (dataType === 'stock') {
+    currentStockTicker = tickersInput.value;
+  } else if (dataType === 'crypto') {
+    currentCryptoTicker =
+      String(tickersInput.value || '').split(',')[0].trim() || currentCryptoTicker;
+  }
+
   if (updateIntervalId) clearInterval(updateIntervalId);
 
   currentInterval = intervalSelect.value;
   chartsContainer.innerHTML = '';
   chartObjects = [];
 
-  // NOTE: cross history は「閉じても残る」要件のため消さない（interval別に保持）
   usdJpyCurrentPrice = null;
 
   statusMessage.textContent = 'チャートを読み込んでいます...';
   currentDataType = dataType;
+
+  // ✅ FIX: タブ切替/再描画のたびに「そのタブのX値」を必ず反映（残留値事故防止）
+  updateXValueDisplay(currentInterval);
 
   if (dataType === 'stock') {
     currentTickers = tickersInput.value.split(',').map((t) => t.trim()).filter((t) => t);
@@ -1182,15 +1202,53 @@ async function start(dataType) {
     const usdJpyChartObj = await renderChartForUsdJpy(currentInterval);
     if (usdJpyChartObj) chartObjects.push(usdJpyChartObj);
 
-    // 描画直後に履歴を再描画（interval別）
     refreshUsdJpyCrossHistoryUI();
 
     statusMessage.textContent = `表示中: USD/JPY (${currentInterval}) - 30秒ごとに更新`;
+    updateIntervalId = setInterval(refreshChartData, 30 * 1000);
+  } else if (dataType === 'crypto') {
+    currentTickers = tickersInput.value.split(',').map((t) => t.trim()).filter((t) => t);
+    currentInterval = intervalSelect.value;
+
+    currentCryptoTicker = currentTickers[0] || currentCryptoTicker;
+    updateXValueDisplay(currentInterval);
+
+    await renderChartsForStocks(currentTickers, currentInterval);
+    statusMessage.textContent = `表示中: ${currentTickers.join(', ')} (${currentInterval}) - 30秒ごとに更新`;
     updateIntervalId = setInterval(refreshChartData, 30 * 1000);
   }
 }
 
 // --- Event Listeners ---
+async function loadCryptoTickers() {
+  try {
+    const response = await fetch('/api/crypto/tickers');
+    if (!response.ok) throw new Error('Failed to fetch tickers');
+    const tickers = await response.json();
+
+    cryptoTickerSelect.innerHTML = '<option value="">銘柄を選択...</option>';
+    tickers.forEach(ticker => {
+      const option = document.createElement('option');
+      option.value = ticker;
+      option.textContent = ticker;
+      cryptoTickerSelect.appendChild(option);
+    });
+  } catch (error) {
+    console.error('Error loading crypto tickers:', error);
+    if (cryptoTickerListContainer) cryptoTickerListContainer.classList.add('hidden');
+  }
+}
+
+if (cryptoTickerSelect) {
+  cryptoTickerSelect.addEventListener('change', () => {
+    if (cryptoTickerSelect.value) {
+      tickersInput.value = cryptoTickerSelect.value;
+      start(currentDataType);
+      updateXValueDisplay(intervalSelect.value);
+    }
+  });
+}
+
 window.addEventListener('resize', () => {
   chartObjects.forEach((obj) => resizeChartObject(obj));
 });
@@ -1270,18 +1328,13 @@ toggleEmailListButton.addEventListener('click', async () => {
   }
 });
 
-// ✅ JSONが無い/壊れてる/空(204)でも落ちないようにする
 async function safeReadJson(response) {
-  // 204 No Content 対策
   if (response.status === 204) return null;
-
   const text = await response.text();
   if (!text) return null;
-
   try {
     return JSON.parse(text);
   } catch {
-    // JSONじゃない場合はテキストをメッセージとして扱う
     return { message: text };
   }
 }
@@ -1292,7 +1345,7 @@ async function deleteEmail(email) {
   try {
     const response = await fetch(`/api/emails/${encodeURIComponent(email)}`, {
       method: 'DELETE',
-      credentials: 'include', // ✅ 別オリジン/セッション対策（同一オリジンでも害なし）
+      credentials: 'include',
     });
 
     const result = await safeReadJson(response);
@@ -1312,19 +1365,14 @@ async function deleteEmail(email) {
 
 async function refreshEmailList() {
   try {
-    const response = await fetch('/api/emails', {
-      credentials: 'include', // ✅
-    });
+    const response = await fetch('/api/emails', { credentials: 'include' });
 
-    // 401/403 のときはUIに出す
     if (!response.ok) {
       const err = await safeReadJson(response);
       throw new Error(err?.error || `メール一覧を取得できませんでした。(HTTP ${response.status})`);
     }
 
     const data = await safeReadJson(response);
-
-    // ✅ APIが配列でも {emails:[...]} でも吸収
     const emails = Array.isArray(data) ? data : Array.isArray(data?.emails) ? data.emails : [];
 
     emailList.innerHTML = '';
@@ -1347,7 +1395,6 @@ async function refreshEmailList() {
       emailSpan.textContent = emailText;
       li.appendChild(emailSpan);
 
-      // ✅ 大文字/小文字揺れでも一致させる
       if (me && emailText.toLowerCase() === me) {
         const deleteButton = document.createElement('button');
         deleteButton.type = 'button';
@@ -1394,8 +1441,12 @@ stockToggle.addEventListener('click', () => {
   currentDataType = 'stock';
   stockToggle.classList.add('active');
   usdJpyToggle.classList.remove('active');
+  if (cryptoToggle) cryptoToggle.classList.remove('active');
+  if (cryptoTickerListContainer) cryptoTickerListContainer.classList.add('hidden');
   updateIntervalOptions(stockIntervalOptions, '1d');
   updateTickerInputVisibility();
+  tickersInput.closest('.input-group').querySelector('label').textContent = '銘柄コード';
+  tickersInput.value = currentStockTicker;
   currentInterval = intervalSelect.value;
   start(currentDataType);
   saveUserSettings();
@@ -1405,6 +1456,8 @@ usdJpyToggle.addEventListener('click', () => {
   currentDataType = 'usd_jpy';
   usdJpyToggle.classList.add('active');
   stockToggle.classList.remove('active');
+  if (cryptoToggle) cryptoToggle.classList.remove('active');
+  if (cryptoTickerListContainer) cryptoTickerListContainer.classList.add('hidden');
   updateIntervalOptions(usdJpyIntervalOptions, '1d');
   updateTickerInputVisibility();
   currentInterval = intervalSelect.value;
@@ -1412,12 +1465,31 @@ usdJpyToggle.addEventListener('click', () => {
   saveUserSettings();
 });
 
+if (cryptoToggle) {
+  cryptoToggle.addEventListener('click', () => {
+    currentDataType = 'crypto';
+    cryptoToggle.classList.add('active');
+    stockToggle.classList.remove('active');
+    usdJpyToggle.classList.remove('active');
+    if (cryptoTickerListContainer) cryptoTickerListContainer.classList.remove('hidden');
+    loadCryptoTickers();
+    updateIntervalOptions(cryptoIntervalOptions, '1d');
+    updateTickerInputVisibility();
+    tickersInput.closest('.input-group').querySelector('label').textContent = '通貨ペア';
+    tickersInput.value = currentCryptoTicker;
+    currentInterval = intervalSelect.value;
+    start(currentDataType);
+    saveUserSettings();
+  });
+}
+
 // --- User Settings Functions ---
 async function saveUserSettings() {
   const settings = {
     currentDataType,
     currentInterval: intervalSelect.value,
-    tickersInput: tickersInput.value,
+    currentStockTicker,
+    currentCryptoTicker,
     areBollingerBandsVisible,
     areEmaVisible,
     bbPeriod: bbPeriodInput.value,
@@ -1425,21 +1497,21 @@ async function saveUserSettings() {
     ema1Period: ema1PeriodInput.value,
     ema2Period: ema2PeriodInput.value,
     ema3Period: ema3PeriodInput.value,
-
-    // ✅ 追加：メール受信ON/OFF（未ログイン等で要素が無い場合はtrue扱い）
     emailAlertsEnabled: emailAlertToggle ? !!emailAlertToggle.checked : true,
-
-    // ✅ ここが重要：掃除した x_values だけ送る（消したものが復活しない）
-    x_values: buildCleanXValues(),
+    x_values: buildCleanXValues(),                // USDJPY thresholds
+    crypto_x_values: currentUserCryptoXValues,    // ✅ crypto thresholds: { [ticker]: { [interval]: number } }
   };
 
   try {
     const response = await fetch('/api/user/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings), // ✅ server側はトップレベル想定（互換はserverで吸収）
+      body: JSON.stringify(settings),
     });
-    if (!response.ok) console.error('Failed to save user settings.');
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      console.error('Failed to save user settings.', errorData.error || '');
+    }
   } catch (error) {
     console.error('Network error saving user settings:', error);
   }
@@ -1450,25 +1522,29 @@ async function loadUserSettings() {
     const response = await fetch(`/api/user/settings?_=${Date.now()}`);
     if (response.ok) {
       const raw = await response.json();
-      // --- FIX: Flatten the settings object to handle corrupted data ---
-      // This ensures top-level properties (which are newer) overwrite older, nested ones.
       const settings = { ...(raw.settings || {}), ...raw };
       delete settings.settings;
-      // --- END FIX ---
 
       if (Object.keys(settings).length > 0) {
-        // ✅ サーバーに保存されている crossHistory を復元（interval別対応）
         applyCrossHistoryFromServer(settings.realTimeState?.crossHistory);
-
-        // ✅ x_values は「正の数だけ」に正規化して保持（0.001勝手復活の温床を除去）
         currentUserXValues = settings.x_values && typeof settings.x_values === 'object' ? settings.x_values : {};
         currentUserXValues = buildCleanXValues();
 
-        currentDataType = settings.currentDataType || 'stock';
-        intervalSelect.value = settings.currentInterval || '1d';
-        currentInterval = intervalSelect.value;
+        currentUserCryptoXValues = settings.crypto_x_values || {};
 
-        tickersInput.value = settings.tickersInput || '7203';
+        currentDataType = settings.currentDataType || 'stock';
+        currentInterval = settings.currentInterval || '1d';
+        intervalSelect.value = currentInterval;
+
+        currentStockTicker = settings.currentStockTicker || '7203';
+        currentCryptoTicker = settings.currentCryptoTicker || 'BTC-USD';
+
+        if (currentDataType === 'stock') {
+          tickersInput.value = currentStockTicker;
+        } else if (currentDataType === 'crypto') {
+          tickersInput.value = currentCryptoTicker;
+        }
+
         areBollingerBandsVisible = settings.areBollingerBandsVisible !== undefined ? settings.areBollingerBandsVisible : true;
         areEmaVisible = settings.areEmaVisible !== undefined ? settings.areEmaVisible : true;
         bbPeriodInput.value = settings.bbPeriod || '20';
@@ -1477,7 +1553,6 @@ async function loadUserSettings() {
         ema2PeriodInput.value = settings.ema2Period || '25';
         ema3PeriodInput.value = settings.ema3Period || '50';
 
-        // ✅ 追加：メール受信トグル復元（未設定はON）
         if (emailAlertToggle) {
           emailAlertToggle.checked = settings.emailAlertsEnabled !== false;
           updateEmailAlertToggleUI();
@@ -1488,10 +1563,23 @@ async function loadUserSettings() {
         if (currentDataType === 'stock') {
           stockToggle.classList.add('active');
           usdJpyToggle.classList.remove('active');
+          if (cryptoToggle) cryptoToggle.classList.remove('active');
+          if (cryptoTickerListContainer) cryptoTickerListContainer.classList.add('hidden');
           updateIntervalOptions(stockIntervalOptions, intervalSelect.value);
+          tickersInput.closest('.input-group').querySelector('label').textContent = '銘柄コード';
+        } else if (currentDataType === 'crypto') {
+          if (cryptoToggle) cryptoToggle.classList.add('active');
+          stockToggle.classList.remove('active');
+          usdJpyToggle.classList.remove('active');
+          if (cryptoTickerListContainer) cryptoTickerListContainer.classList.remove('hidden');
+          loadCryptoTickers();
+          updateIntervalOptions(cryptoIntervalOptions, intervalSelect.value);
+          tickersInput.closest('.input-group').querySelector('label').textContent = '通貨ペア';
         } else {
           usdJpyToggle.classList.add('active');
           stockToggle.classList.remove('active');
+          if (cryptoToggle) cryptoToggle.classList.remove('active');
+          if (cryptoTickerListContainer) cryptoTickerListContainer.classList.add('hidden');
           updateIntervalOptions(usdJpyIntervalOptions, intervalSelect.value);
         }
 
@@ -1514,14 +1602,31 @@ async function loadUserSettings() {
 }
 
 // --- Authentication & X-Value Functions ---
-// ✅ 未設定なら空欄＋「未設定」表示（0.001を見せない）
 function updateXValueDisplay(interval) {
   if (xValueControls.classList.contains('hidden')) return;
 
-  const iv = interval; // 表示は常にUI選択に合わせる
+  updateXValueContextLabel();
+
+  // ✅ stockタブではX値は使わない（誤保存防止）
+  const supported = currentDataType === 'usd_jpy' || currentDataType === 'crypto';
+  if (!supported) {
+    setXValueUiEnabled(false);
+    xValueIntervalLabel.textContent = interval;
+    currentXValueSpan.textContent = 'このタブではしきい値は使用しません';
+    xValueInput.value = '';
+    return;
+  }
+  setXValueUiEnabled(true);
+
+  const iv = interval;
   xValueIntervalLabel.textContent = iv;
 
-  const v = getXValueForInterval(iv);
+  let v = null;
+  if (currentDataType === 'crypto') {
+    v = currentUserCryptoXValues?.[currentCryptoTicker]?.[iv];
+  } else {
+    v = getXValueForInterval(iv);
+  }
 
   if (v == null) {
     currentXValueSpan.textContent = '現在の値: 未設定';
@@ -1539,7 +1644,6 @@ async function checkAuthStatus() {
     if (response.ok) {
       const data = await response.json();
 
-      // ✅ ログイン中ユーザーごとに localStorage キーを分ける
       lsKeySuffix = String(data.user.id ?? data.user.email ?? 'guest');
 
       userInfoSpan.textContent = `ようこそ、${data.user.username}さん！`;
@@ -1550,39 +1654,33 @@ async function checkAuthStatus() {
       logoutButton.classList.remove('hidden');
       xValueControls.classList.remove('hidden');
 
-      // ✅ 追加：ログイン中だけヘッダーにトグルを出す
       if (emailAlertToggleContainer) emailAlertToggleContainer.classList.remove('hidden');
       if (emailAlertToggle) {
-        emailAlertToggle.checked = true; // loadUserSettingsで上書きされる
+        emailAlertToggle.checked = true;
         updateEmailAlertToggleUI();
       }
 
-      // ✅ 先に空欄にして、HTMLの初期値(0.001等)が見えないようにする
       try {
         xValueInput.value = '';
         currentXValueSpan.textContent = '現在の値: 読み込み中...';
       } catch {}
 
-      // まず localStorage から復元（サーバー復元までの保険）
       loadCrossHistoryFromLocalStorage();
 
-      // ✅ ここで(再)接続：ログイン後に socket に session を乗せる
       connectSocket();
       await loadUserSettings();
-      // session を reload して userId を socket に反映（ログイン直後でも効く）
       try {
         socket?.emit('auth_sync');
       } catch {}
     } else {
-      // 未ログイン時は過去ユーザーの履歴を見せない
       currentUserEmail = null;
       lsKeySuffix = 'guest';
       latestCrossPricesByInterval = {};
       latestEmaCrossPricesByInterval = {};
       currentUserXValues = {};
+      currentUserCryptoXValues = {};
       clearCrossHistoryLocalStorage();
 
-      // ✅ ヘッダーのトグルは隠す
       if (emailAlertToggleContainer) emailAlertToggleContainer.classList.add('hidden');
 
       userInfoSpan.classList.add('hidden');
@@ -1599,9 +1697,9 @@ async function checkAuthStatus() {
     latestCrossPricesByInterval = {};
     latestEmaCrossPricesByInterval = {};
     currentUserXValues = {};
+    currentUserCryptoXValues = {};
     clearCrossHistoryLocalStorage();
 
-    // ✅ ヘッダーのトグルは隠す
     if (emailAlertToggleContainer) emailAlertToggleContainer.classList.add('hidden');
 
     console.error('Failed to check authentication status:', error);
@@ -1621,7 +1719,6 @@ async function handleLogout() {
     const data = await response.json();
     if (response.ok) {
       alert(data.message || 'ログアウトしました。');
-      // ✅ 現ユーザーのlocalStorageを消す（suffixが変わる前に）
       clearCrossHistoryLocalStorage();
 
       currentUserEmail = null;
@@ -1629,9 +1726,9 @@ async function handleLogout() {
       latestCrossPricesByInterval = {};
       latestEmaCrossPricesByInterval = {};
       currentUserXValues = {};
+      currentUserCryptoXValues = {};
       xValueControls.classList.add('hidden');
 
-      // ✅ 追加：ログアウト時はヘッダーのトグルも隠す
       if (emailAlertToggleContainer) emailAlertToggleContainer.classList.add('hidden');
 
       await checkAuthStatus();
@@ -1646,47 +1743,66 @@ async function handleLogout() {
 
 logoutButton.addEventListener('click', handleLogout);
 
-// ✅ 空欄＝削除として保存（復活しない）
-// ✅ 0以下は無効
 saveXValueButton.addEventListener('click', () => {
   const iv = intervalSelect.value;
   const raw = String(xValueInput.value ?? '').trim();
-
-  // 空欄＝削除
-  if (raw === '') {
-    if (hasOwn(currentUserXValues, iv)) delete currentUserXValues[iv];
-    updateXValueDisplay(iv);
-    saveUserSettings();
-    return;
-  }
-
   const n = normalizeXValue(raw);
-  if (n == null) {
+
+  if (raw !== '' && n == null) {
     alert('0より大きい数値を入力してください。（空欄は削除になります）');
     return;
   }
 
-  currentUserXValues[iv] = n;
+  if (currentDataType === 'crypto') {
+    if (!currentUserCryptoXValues[currentCryptoTicker]) currentUserCryptoXValues[currentCryptoTicker] = {};
+    if (n == null) {
+      delete currentUserCryptoXValues[currentCryptoTicker][iv];
+    } else {
+      currentUserCryptoXValues[currentCryptoTicker][iv] = n;
+    }
+  } else {
+    if (n == null) {
+      delete currentUserXValues[iv];
+    } else {
+      currentUserXValues[iv] = n;
+    }
+  }
+
   updateXValueDisplay(iv);
   saveUserSettings();
 });
 
-// ✅ Chromeの「×」でクリアして保存ボタン押し忘れでも消えるようにする
 xValueInput.addEventListener('blur', () => {
   const iv = intervalSelect.value;
   const raw = String(xValueInput.value ?? '').trim();
 
-  if (raw === '' && hasOwn(currentUserXValues, iv)) {
-    delete currentUserXValues[iv];
-    updateXValueDisplay(iv);
-    saveUserSettings();
+  if (raw === '') {
+    if (currentDataType === 'crypto') {
+      if (currentUserCryptoXValues?.[currentCryptoTicker]?.[iv]) {
+        delete currentUserCryptoXValues[currentCryptoTicker][iv];
+        updateXValueDisplay(iv);
+        saveUserSettings();
+      }
+    } else {
+      if (hasOwn(currentUserXValues, iv)) {
+        delete currentUserXValues[iv];
+        updateXValueDisplay(iv);
+        saveUserSettings();
+      }
+    }
   }
 });
 
 deleteXValueButton.addEventListener('click', () => {
   const iv = intervalSelect.value;
-  if (hasOwn(currentUserXValues, iv)) {
-    delete currentUserXValues[iv];
+  if (currentDataType === 'crypto') {
+    if (currentUserCryptoXValues?.[currentCryptoTicker]?.[iv]) {
+      delete currentUserCryptoXValues[currentCryptoTicker][iv];
+    }
+  } else {
+    if (hasOwn(currentUserXValues, iv)) {
+      delete currentUserXValues[iv];
+    }
   }
   xValueInput.value = '';
   updateXValueDisplay(iv);
@@ -1709,6 +1825,7 @@ function connectSocket() {
     } catch {}
   });
 
+  // ===== USDJPY cross events =====
   socket.on('bb_cross', async (data) => {
     console.log('BB Cross event received:', data);
     if (notificationElement) {
@@ -1747,7 +1864,7 @@ function connectSocket() {
     setTimeout(() => notificationElement?.classList.add('hidden'), 5000);
   });
 
-  // ✅ serverが「メール送信→DBのcrossHistoryをnullにした」ことを通知
+  // ===== USDJPY clear event =====
   socket.on('cross_history_cleared', (data) => {
     try {
       const indicatorName = data?.indicatorName;
@@ -1766,6 +1883,31 @@ function connectSocket() {
     }
   });
 
+  // ===== ✅ crypto cross events（ドル円crossHistoryに混ぜない）=====
+  socket.on('crypto_bb_cross', (data) => {
+    console.log('CRYPTO BB Cross event received:', data);
+    if (notificationElement) {
+      notificationElement.textContent = data.message;
+      notificationElement.classList.remove('hidden');
+      setTimeout(() => notificationElement?.classList.add('hidden'), 5000);
+    }
+    // cryptoの履歴表示は現状UI未実装（必要ならここで別stateに保存できる）
+  });
+
+  socket.on('crypto_ema_cross', (data) => {
+    console.log('CRYPTO EMA Cross event received:', data);
+    if (notificationElement) {
+      notificationElement.textContent = data.message;
+      notificationElement.classList.remove('hidden');
+      setTimeout(() => notificationElement?.classList.add('hidden'), 5000);
+    }
+  });
+
+  socket.on('crypto_cross_history_cleared', (data) => {
+    // ✅ USDJPYの履歴は消さない（crypto専用クリア通知）
+    console.log('CRYPTO cross history cleared:', data);
+  });
+
   socket.on('usd_jpy_price_update', (data) => {
     usdJpyCurrentPrice = data.price;
 
@@ -1773,8 +1915,6 @@ function connectSocket() {
     if (usdJpyChartObj?.currentPriceValuesElement) {
       updateCurrentPriceValue(usdJpyChartObj.currentPriceValuesElement, [{ close: data.price }]);
     }
-
-    // ✅ 重要：ここで閾値判定して crossHistory を消さない（メール送信はserverが担当）
   });
 
   socket.on('disconnect', () => console.log('Disconnected from WebSocket server.'));
@@ -1791,7 +1931,5 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   updateTickerInputVisibility();
-
-  // ✅ 認証状態確定（lsKeySuffix確定）後に socket を張る
-  await checkAuthStatus(); // checkAuthStatus内でconnectSocket()される
+  await checkAuthStatus();
 });
