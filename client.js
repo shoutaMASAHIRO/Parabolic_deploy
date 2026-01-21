@@ -52,6 +52,17 @@ const xValueInput = document.getElementById('x-value-input');
 const saveXValueButton = document.getElementById('save-x-value-button');
 const deleteXValueButton = document.getElementById('delete-x-value-button');
 
+// --- Memo DOM Elements ---
+const memoCard = document.getElementById('memo-card');
+const openMemoModalButton = document.getElementById('open-memo-modal-button');
+const memoModalOverlay = document.getElementById('memo-modal-overlay');
+const memoModalTitle = document.getElementById('memo-modal-title');
+const memoModalCloseButton = document.getElementById('memo-modal-close-button');
+const memoTextarea = document.getElementById('memo-textarea');
+const cancelMemoButton = document.getElementById('cancel-memo-button');
+const saveMemoButton = document.getElementById('save-memo-button');
+const memoList = document.getElementById('memo-list');
+
 // --- Global State ---
 let chartObjects = []; // holds all chart instances and their series for updates
 let updateIntervalId = null;
@@ -64,6 +75,9 @@ let currentTickers = [];
 let areBollingerBandsVisible = true;
 let areEmaVisible = true;
 let currentUserEmail = null;
+let currentMemoSymbol = null;
+let editingMemoId = null;
+
 
 // ✅ intervalごとに保持（独立運用）
 let latestCrossPricesByInterval = {}; // USDJPY BB: { [interval]: { upper2: {price,interval,timestamp}|null, ... } }
@@ -708,6 +722,172 @@ function updateIntervalOptions(options, defaultValue) {
     intervalSelect.appendChild(opt);
   });
   intervalSelect.value = options.some((opt) => opt.value === defaultValue) ? defaultValue : options[0].value;
+}
+
+// --- Memo Functions ---
+
+function formatMemoDate(isoString) {
+    const date = new Date(isoString);
+    return date.toLocaleString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function resetMemoEditor() {
+    memoTextarea.value = '';
+    editingMemoId = null;
+    saveMemoButton.textContent = '保存';
+}
+
+async function openMemoModal() {
+    if (currentDataType === 'stock') {
+        currentMemoSymbol = currentStockTicker.endsWith('.T') ? currentStockTicker : `${currentStockTicker}.T`;
+    } else if (currentDataType === 'crypto') {
+        currentMemoSymbol = currentCryptoTicker;
+    } else { // usd_jpy
+        currentMemoSymbol = 'USDJPY=X';
+    }
+
+    if (!currentMemoSymbol) {
+        alert('メモ機能を利用する銘柄が特定できません。');
+        return;
+    }
+
+    memoModalTitle.textContent = `メモ: ${currentMemoSymbol}`;
+    resetMemoEditor();
+    await fetchAndRenderMemos();
+    memoModalOverlay.classList.remove('hidden');
+}
+
+function closeMemoModal() {
+    memoModalOverlay.classList.add('hidden');
+    resetMemoEditor();
+}
+
+async function fetchAndRenderMemos() {
+    if (!currentMemoSymbol) return;
+    try {
+        const response = await fetch(`/api/memos/${encodeURIComponent(currentMemoSymbol)}`);
+        if (!response.ok) {
+            throw new Error('メモの読み込みに失敗しました。');
+        }
+        const memos = await response.json();
+        renderMemoList(memos);
+    } catch (error) {
+        console.error('Error fetching memos:', error);
+        memoList.innerHTML = '<li>メモの読み込みに失敗しました。</li>';
+    }
+}
+
+function renderMemoList(memos) {
+    memoList.innerHTML = '';
+    if (!memos || memos.length === 0) {
+        memoList.innerHTML = '<li>まだメモはありません。</li>';
+        return;
+    }
+
+    memos.forEach(memo => {
+        const li = document.createElement('li');
+        li.className = 'memo-item';
+        li.dataset.memoId = memo.id;
+        li.innerHTML = `
+            <div class="memo-content">${memo.content.replace(/\n/g, '<br>')}</div>
+            <div class="memo-meta">
+                <span class="memo-date">更新日時: ${formatMemoDate(memo.updated_at || memo.created_at)}</span>
+                <div class="memo-actions">
+                    <button class="btn btn-secondary edit-memo-button">編集</button>
+                    <button class="btn btn-danger delete-memo-button">削除</button>
+                </div>
+            </div>
+        `;
+        memoList.appendChild(li);
+    });
+}
+
+async function handleSaveMemo() {
+    const content = memoTextarea.value.trim();
+    if (!content) {
+        alert('メモの内容を入力してください。');
+        return;
+    }
+
+    const memoData = {
+        symbol: currentMemoSymbol,
+        content: content,
+    };
+
+    try {
+        let response;
+        if (editingMemoId) {
+            // Update existing memo
+            response = await fetch(`/api/memos/${editingMemoId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content }),
+            });
+        } else {
+            // Create new memo
+            response = await fetch('/api/memos', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(memoData),
+            });
+        }
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ error: '保存に失敗しました。' }));
+            throw new Error(error.error);
+        }
+
+        resetMemoEditor();
+        await fetchAndRenderMemos();
+
+    } catch (error) {
+        console.error('Error saving memo:', error);
+        alert(`エラー: ${error.message}`);
+    }
+}
+
+function handleMemoListClick(event) {
+    const target = event.target;
+    const memoItem = target.closest('.memo-item');
+    if (!memoItem) return;
+
+    const memoId = memoItem.dataset.memoId;
+
+    if (target.classList.contains('delete-memo-button')) {
+        if (confirm('このメモを本当に削除しますか？')) {
+            handleDeleteMemo(memoId);
+        }
+    } else if (target.classList.contains('edit-memo-button')) {
+        const contentDiv = memoItem.querySelector('.memo-content');
+        const content = contentDiv.innerHTML.replace(/<br>/g, '\n');
+        handleEditMemo(memoId, content);
+    }
+}
+
+async function handleDeleteMemo(memoId) {
+    try {
+        const response = await fetch(`/api/memos/${memoId}`, { method: 'DELETE' });
+        if (!response.ok) {
+             const error = await response.json().catch(() => ({ error: '削除に失敗しました。' }));
+            throw new Error(error.error);
+        }
+        // Visually remove the item immediately for better UX
+        const itemToRemove = memoList.querySelector(`[data-memo-id='${memoId}']`);
+        if (itemToRemove) {
+            itemToRemove.remove();
+        }
+    } catch (error) {
+        console.error('Error deleting memo:', error);
+        alert(`エラー: ${error.message}`);
+    }
+}
+
+function handleEditMemo(memoId, content) {
+    editingMemoId = memoId;
+    memoTextarea.value = content;
+    saveMemoButton.textContent = '更新';
+    memoModalOverlay.querySelector('.modal-body').scrollTop = 0; // scroll to top
+    memoTextarea.focus();
 }
 
 // --- Charting Configuration ---
@@ -1500,22 +1680,21 @@ async function refreshEmailList() {
       const emailText = String(item?.email ?? '');
       const emailSpan = document.createElement('span');
       emailSpan.textContent = emailText;
-      li.appendChild(emailSpan);
+      emailList.appendChild(emailSpan);
 
-      if (me && emailText.toLowerCase() === me) {
-        const deleteButton = document.createElement('button');
-        deleteButton.type = 'button';
-        deleteButton.textContent = '削除';
-        deleteButton.classList.add('delete-email-button');
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.textContent = '削除';
+      deleteButton.classList.add('delete-email-button');
 
-        deleteButton.addEventListener('click', async (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          await deleteEmail(emailText);
-        });
+      deleteButton.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        await deleteEmail(emailText);
+      });
 
-        li.appendChild(deleteButton);
-      }
+      li.appendChild(deleteButton);
+
 
       emailList.appendChild(li);
     });
@@ -1762,6 +1941,7 @@ async function checkAuthStatus() {
       registerButton.classList.add('hidden');
       logoutButton.classList.remove('hidden');
       xValueControls.classList.remove('hidden');
+      if (memoCard) memoCard.classList.remove('hidden');
 
       if (emailAlertToggleContainer) emailAlertToggleContainer.classList.remove('hidden');
       if (emailAlertToggle) {
@@ -1797,6 +1977,7 @@ async function checkAuthStatus() {
       registerButton.classList.remove('hidden');
       logoutButton.classList.add('hidden');
       xValueControls.classList.add('hidden');
+      if (memoCard) memoCard.classList.add('hidden');
       connectSocket();
       start(currentDataType);
     }
@@ -1817,6 +1998,7 @@ async function checkAuthStatus() {
     registerButton.classList.remove('hidden');
     logoutButton.classList.add('hidden');
     xValueControls.classList.add('hidden');
+    if (memoCard) memoCard.classList.add('hidden');
     connectSocket();
     start(currentDataType);
   }
@@ -1837,6 +2019,7 @@ async function handleLogout() {
       currentUserXValues = {};
       currentUserCryptoXValues = {};
       xValueControls.classList.add('hidden');
+      if (memoCard) memoCard.classList.add('hidden');
 
       if (emailAlertToggleContainer) emailAlertToggleContainer.classList.add('hidden');
 
@@ -2053,4 +2236,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   updateTickerInputVisibility();
   await checkAuthStatus();
+
+    // --- Memo Event Listeners ---
+    if (openMemoModalButton) {
+        openMemoModalButton.addEventListener('click', openMemoModal);
+    }
+    if (memoModalCloseButton) {
+        memoModalCloseButton.addEventListener('click', closeMemoModal);
+    }
+    if (memoModalOverlay) {
+        memoModalOverlay.addEventListener('click', (e) => {
+            if (e.target === memoModalOverlay) {
+                closeMemoModal();
+            }
+        });
+    }
+    if (saveMemoButton) {
+        saveMemoButton.addEventListener('click', handleSaveMemo);
+    }
+    if (cancelMemoButton) {
+        cancelMemoButton.addEventListener('click', () => {
+            resetMemoEditor();
+            closeMemoModal();
+        });
+    }
+    if (memoList) {
+        memoList.addEventListener('click', handleMemoListClick);
+    }
 });

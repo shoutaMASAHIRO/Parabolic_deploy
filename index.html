@@ -158,6 +158,15 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Memo Card -->
+            <div id="memo-card" class="sidebar-card hidden">
+                <h3 class="card-title">メモ機能</h3>
+                <div class="card-content">
+                    <button id="open-memo-modal-button" class="btn btn-secondary">メモを開く</button>
+                </div>
+            </div>
+
              <!-- Hidden buttons for client.js to find -->
             <div style="display: none;">
                 <button id="toggle-settings-button"></button>
@@ -178,6 +187,32 @@
         </footer>
     </div>
     
+    <!-- Memo Modal -->
+    <div id="memo-modal-overlay" class="modal-overlay hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="memo-modal-title" class="modal-title">メモ</h2>
+                <button id="memo-modal-close-button" class="modal-close-button">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="memo-editor-container">
+                    <div id="memo-editor">
+                        <textarea id="memo-textarea" placeholder="ここにメモを入力..."></textarea>
+                        <div id="memo-editor-actions">
+                            <button id="cancel-memo-button" class="btn btn-secondary">キャンセル</button>
+                            <button id="save-memo-button" class="btn btn-primary">保存</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="memo-list-container">
+                    <ul id="memo-list">
+                        <!-- Memos will be dynamically inserted here -->
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="dist/bundle.js"></script>
 </body>
 </html>

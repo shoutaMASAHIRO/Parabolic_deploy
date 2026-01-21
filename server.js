@@ -113,14 +113,46 @@ async function ensureTables() {
     );
   `);
 
+  // ✅ emails: user_id + symbol + email の3キーで独立させる（銘柄別）
+  // 新規DBではこれで作成、既存DBには下の ALTER で追従させる
   await pool.query(`
     CREATE TABLE IF NOT EXISTS emails (
       id SERIAL PRIMARY KEY,
       user_id INT REFERENCES users(id) ON DELETE CASCADE,
+      symbol TEXT NOT NULL DEFAULT 'GLOBAL',
       email TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(user_id, email)
+      created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
+  `);
+
+  // 既存のemailsが古い場合のマイグレーション（安全に実行できる形）
+  await pool.query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS symbol TEXT;`);
+  await pool.query(`UPDATE emails SET symbol = 'GLOBAL' WHERE symbol IS NULL;`);
+  await pool.query(`ALTER TABLE emails ALTER COLUMN symbol SET DEFAULT 'GLOBAL';`);
+  await pool.query(`ALTER TABLE emails ALTER COLUMN symbol SET NOT NULL;`);
+
+  // 旧UNIQUEを落とす（存在しなければスキップ）
+  await pool.query(`ALTER TABLE emails DROP CONSTRAINT IF EXISTS emails_email_key;`);
+  await pool.query(`ALTER TABLE emails DROP CONSTRAINT IF EXISTS emails_user_id_email_key;`);
+  await pool.query(`ALTER TABLE emails DROP CONSTRAINT IF EXISTS emails_user_id_email_uq;`);
+
+  // ✅ (user_id, symbol, email) の UNIQUE を保証（既にあれば何もしない）
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'emails_user_symbol_email_uq'
+      ) THEN
+        ALTER TABLE emails
+          ADD CONSTRAINT emails_user_symbol_email_uq UNIQUE (user_id, symbol, email);
+      END IF;
+    END$$;
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS emails_user_symbol_idx
+    ON emails (user_id, symbol);
   `);
 
   await pool.query(`
@@ -130,11 +162,63 @@ async function ensureTables() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // ✅ これを追加（既存DBが古くても ON CONFLICT(user_id) が必ず成立する）
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS user_settings_user_id_uq
+    ON user_settings (user_id);
+  `);
+
+  // ✅ memos（server.js 側でも必ず作る）
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS memos (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      symbol TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS memos_user_symbol_updated_idx
+    ON memos (user_id, symbol, updated_at DESC);
+  `);
+
+  // ✅ updated_at 自動更新トリガ（memos用）
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION update_updated_at_column()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      NEW.updated_at = NOW();
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+  `);
+
+  await pool.query(`DROP TRIGGER IF EXISTS update_memos_updated_at ON memos;`);
+  await pool.query(`
+    CREATE TRIGGER update_memos_updated_at
+    BEFORE UPDATE ON memos
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+  `);
+}
+
+function getSessionUserId(req) {
+  return req.session?.userId ?? null;
 }
 
 function requireAuth(req, res, next) {
-  if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated.' });
+  const uid = getSessionUserId(req);
+  if (!uid) return res.status(401).json({ error: 'Not authenticated.' });
   next();
+}
+
+function normalizeSymbol(raw, fallback = 'GLOBAL') {
+  const s = String(raw ?? '').trim();
+  return s ? s : fallback;
 }
 
 // =====================
@@ -592,44 +676,168 @@ app.post('/api/user/settings', requireAuth, async (req, res) => {
 });
 
 // =====================
-// API: Email subscriptions (user-scoped)
+// API: Memos
 // =====================
+app.get('/api/memos/:symbol', requireAuth, async (req, res) => {
+  try {
+    const { symbol } = req.params;
+    const userId = req.session.userId;
+
+    const result = await pool.query(
+      'SELECT id, symbol, content, created_at, updated_at FROM memos WHERE user_id = $1 AND symbol = $2 ORDER BY updated_at DESC',
+      [userId, symbol]
+    );
+
+    res.json(result.rows);
+  } catch (e) {
+    console.error('Failed to fetch memos:', e);
+    res.status(500).json({ error: 'Failed to fetch memos.' });
+  }
+});
+
+app.post('/api/memos', requireAuth, async (req, res) => {
+  try {
+    const { symbol, content } = req.body;
+    const userId = req.session.userId;
+
+    if (!symbol || !content) {
+      return res.status(400).json({ error: 'Symbol and content are required.' });
+    }
+
+    const result = await pool.query(
+      'INSERT INTO memos (user_id, symbol, content) VALUES ($1, $2, $3) RETURNING id, symbol, content, created_at, updated_at',
+      [userId, symbol, content]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (e) {
+    console.error('Failed to create memo:', e);
+    res.status(500).json({ error: 'Failed to create memo.' });
+  }
+});
+
+app.put('/api/memos/:id', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content } = req.body;
+    const userId = req.session.userId;
+
+    if (!content) {
+      return res.status(400).json({ error: 'Content is required.' });
+    }
+
+    const result = await pool.query(
+      'UPDATE memos SET content = $1 WHERE id = $2 AND user_id = $3 RETURNING id, symbol, content, created_at, updated_at',
+      [content, id, userId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Memo not found or you do not have permission to edit it.' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (e) {
+    console.error('Failed to update memo:', e);
+    res.status(500).json({ error: 'Failed to update memo.' });
+  }
+});
+
+app.delete('/api/memos/:id', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.session.userId;
+
+    const result = await pool.query('DELETE FROM memos WHERE id = $1 AND user_id = $2', [id, userId]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Memo not found or you do not have permission to delete it.' });
+    }
+
+    res.status(204).send(); // No Content
+  } catch (e) {
+    console.error('Failed to delete memo:', e);
+    res.status(500).json({ error: 'Failed to delete memo.' });
+  }
+});
+
+// =====================
+// API: Email subscriptions (user + symbol scoped)
+// =====================
+
+// ✅ 追加：userの基本メール + 追加購読先（symbol別 + GLOBALも含める）をまとめて返す
+async function getRecipientsForSymbol(userId, symbol) {
+  const rMail = await pool.query(`SELECT email FROM users WHERE id = $1`, [userId]);
+  const userEmail = rMail.rows[0]?.email || null;
+
+  const rSubs = await pool.query(
+    `SELECT email
+     FROM emails
+     WHERE user_id = $1 AND (symbol = $2 OR symbol = 'GLOBAL')
+     ORDER BY created_at DESC, id DESC`,
+    [userId, symbol]
+  );
+  const extra = rSubs.rows.map((z) => z.email);
+
+  return [userEmail, ...extra].filter(Boolean);
+}
+
+// ✅ 登録（銘柄別）
 app.post('/api/subscribe', requireAuth, async (req, res) => {
   try {
     const uid = req.session.userId;
-    const { email } = req.body || {};
+    const email = String(req.body?.email ?? '').trim();
+    const symbol = normalizeSymbol(req.body?.symbol, 'GLOBAL');
+
     if (!email || !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Invalid email.' });
 
     await pool.query(
-      `INSERT INTO emails (user_id, email) VALUES ($1, $2)
-       ON CONFLICT (user_id, email) DO NOTHING`,
-      [uid, email]
+      `INSERT INTO emails (user_id, symbol, email)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, symbol, email) DO NOTHING`,
+      [uid, symbol, email]
     );
 
-    return res.json({ message: '登録しました。' });
+    return res.json({ message: `登録しました。（${symbol}）` });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'Failed to subscribe.' });
   }
 });
 
+// ✅ 一覧（銘柄別） 例: /api/emails?symbol=BTC-USD
 app.get('/api/emails', requireAuth, async (req, res) => {
   try {
     const uid = req.session.userId;
-    const r = await pool.query(`SELECT email FROM emails WHERE user_id = $1 ORDER BY created_at DESC`, [uid]);
-    return res.json(r.rows);
+    const symbol = normalizeSymbol(req.query?.symbol, 'GLOBAL');
+
+    const r = await pool.query(
+      `SELECT id, email, symbol, created_at
+       FROM emails
+       WHERE user_id = $1 AND symbol = $2
+       ORDER BY created_at DESC, id DESC`,
+      [uid, symbol]
+    );
+
+    return res.json({ emails: r.rows });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'Failed to fetch emails.' });
   }
 });
 
+// ✅ 削除（銘柄別） 例: DELETE /api/emails/test%40a.com?symbol=BTC-USD
 app.delete('/api/emails/:email', requireAuth, async (req, res) => {
   try {
     const uid = req.session.userId;
     const email = decodeURIComponent(req.params.email || '');
-    await pool.query(`DELETE FROM emails WHERE user_id = $1 AND email = $2`, [uid, email]);
-    return res.json({ message: '削除しました。' });
+    const symbol = normalizeSymbol(req.query?.symbol, 'GLOBAL');
+
+    const result = await pool.query(
+      `DELETE FROM emails WHERE user_id = $1 AND symbol = $2 AND email = $3`,
+      [uid, symbol, email]
+    );
+
+    return res.json({ message: `削除しました。（${symbol}）`, deleted: result.rowCount });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'Failed to delete email.' });
@@ -637,21 +845,22 @@ app.delete('/api/emails/:email', requireAuth, async (req, res) => {
 });
 
 // 手動送信ボタン（必要なら）
+// 例: POST /api/send-emails { "symbol": "BTC-USD" }
 app.post('/api/send-emails', requireAuth, async (req, res) => {
   try {
     const uid = req.session.userId;
-    const r = await pool.query(`SELECT email FROM emails WHERE user_id = $1`, [uid]);
-    const list = r.rows.map((x) => x.email);
+    const symbol = normalizeSymbol(req.body?.symbol ?? req.query?.symbol, 'GLOBAL');
 
-    if (list.length === 0) return res.json({ message: '送信先がありません。' });
+    const recipients = await getRecipientsForSymbol(uid, symbol);
+    if (recipients.length === 0) return res.json({ message: '送信先がありません。' });
 
     await sendMail({
-      to: list.join(','),
-      subject: 'Parabolic Notification',
+      to: recipients.join(','),
+      subject: `Parabolic Notification (${symbol})`,
       text: 'テスト送信です。',
     });
 
-    return res.json({ message: 'メールを送信しました。' });
+    return res.json({ message: `メールを送信しました。（${symbol}）` });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: 'Failed to send emails.' });
@@ -818,12 +1027,8 @@ async function processUsdJpyForUser(userId, settings) {
   if (emailEnabled) {
     const x = normalizeXValue(settings.x_values?.[iv]);
     if (x != null) {
-      const rMail = await pool.query(`SELECT email FROM users WHERE id = $1`, [userId]);
-      const userEmail = rMail.rows[0]?.email || null;
-
-      const rSubs = await pool.query(`SELECT email FROM emails WHERE user_id = $1`, [userId]);
-      const extra = rSubs.rows.map((z) => z.email);
-      const recipients = [userEmail, ...extra].filter(Boolean);
+      // ✅ USDJPY 用は symbol='USDJPY=X' の購読先だけに送る（+ GLOBAL は同梱）
+      const recipients = await getRecipientsForSymbol(userId, 'USDJPY=X');
 
       if (recipients.length > 0) {
         for (const [name, ev] of Object.entries(ivMap || {})) {
@@ -955,12 +1160,8 @@ async function processCryptoForUser(userId, settings) {
     if (emailEnabled) {
       const threshold = normalizeXValue(cx?.[ticker]?.[iv]);
       if (threshold != null) {
-        const rMail = await pool.query(`SELECT email FROM users WHERE id = $1`, [userId]);
-        const userEmail = rMail.rows[0]?.email || null;
-
-        const rSubs = await pool.query(`SELECT email FROM emails WHERE user_id = $1`, [userId]);
-        const extra = rSubs.rows.map((z) => z.email);
-        const recipients = [userEmail, ...extra].filter(Boolean);
+        // ✅ crypto 用は symbol=ticker の購読先だけに送る（+ GLOBAL は同梱）
+        const recipients = await getRecipientsForSymbol(userId, ticker);
 
         if (recipients.length > 0) {
           for (const [name, ev] of Object.entries(ivMap || {})) {

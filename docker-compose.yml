@@ -16,6 +16,17 @@ services:
       AWS_DEFAULT_REGION: ap-northeast-1
       AWS_SDK_LOAD_CONFIG: "1"
       AWS_PROFILE: parabolic-dev
+
+      # ✅ Windows由来のHOME汚染対策（AWS SDKが ~/.aws を正しく参照できるように固定）
+      HOME: /root
+      AWS_SHARED_CREDENTIALS_FILE: /root/.aws/credentials
+      AWS_CONFIG_FILE: /root/.aws/config
+
+      # ✅ SSMからGmail資格情報を読むために必要（あなたのSSMパラメータ名に置き換える）
+      SSM_GMAIL_USER_PARAM: "/parabolic/gmail/user"
+      SSM_GMAIL_PASS_PARAM: "/parabolic/gmail/pass"
+
+
     depends_on:
       db:
         condition: service_healthy

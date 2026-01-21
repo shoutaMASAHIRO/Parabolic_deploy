@@ -10654,6 +10654,15 @@
   var xValueInput = document.getElementById("x-value-input");
   var saveXValueButton = document.getElementById("save-x-value-button");
   var deleteXValueButton = document.getElementById("delete-x-value-button");
+  var memoCard = document.getElementById("memo-card");
+  var openMemoModalButton = document.getElementById("open-memo-modal-button");
+  var memoModalOverlay = document.getElementById("memo-modal-overlay");
+  var memoModalTitle = document.getElementById("memo-modal-title");
+  var memoModalCloseButton = document.getElementById("memo-modal-close-button");
+  var memoTextarea = document.getElementById("memo-textarea");
+  var cancelMemoButton = document.getElementById("cancel-memo-button");
+  var saveMemoButton = document.getElementById("save-memo-button");
+  var memoList = document.getElementById("memo-list");
   var chartObjects = [];
   var updateIntervalId = null;
   var currentDataType = "stock";
@@ -10665,6 +10674,8 @@
   var areBollingerBandsVisible = true;
   var areEmaVisible = true;
   var currentUserEmail = null;
+  var currentMemoSymbol = null;
+  var editingMemoId = null;
   var latestCrossPricesByInterval = {};
   var latestEmaCrossPricesByInterval = {};
   var usdJpyCurrentPrice = null;
@@ -11202,6 +11213,149 @@
       intervalSelect.appendChild(opt);
     });
     intervalSelect.value = options.some((opt) => opt.value === defaultValue) ? defaultValue : options[0].value;
+  }
+  function formatMemoDate(isoString) {
+    const date = new Date(isoString);
+    return date.toLocaleString("ja-JP", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+  function resetMemoEditor() {
+    memoTextarea.value = "";
+    editingMemoId = null;
+    saveMemoButton.textContent = "\u4FDD\u5B58";
+  }
+  async function openMemoModal() {
+    if (currentDataType === "stock") {
+      currentMemoSymbol = currentStockTicker.endsWith(".T") ? currentStockTicker : `${currentStockTicker}.T`;
+    } else if (currentDataType === "crypto") {
+      currentMemoSymbol = currentCryptoTicker;
+    } else {
+      currentMemoSymbol = "USDJPY=X";
+    }
+    if (!currentMemoSymbol) {
+      alert("\u30E1\u30E2\u6A5F\u80FD\u3092\u5229\u7528\u3059\u308B\u9298\u67C4\u304C\u7279\u5B9A\u3067\u304D\u307E\u305B\u3093\u3002");
+      return;
+    }
+    memoModalTitle.textContent = `\u30E1\u30E2: ${currentMemoSymbol}`;
+    resetMemoEditor();
+    await fetchAndRenderMemos();
+    memoModalOverlay.classList.remove("hidden");
+  }
+  function closeMemoModal() {
+    memoModalOverlay.classList.add("hidden");
+    resetMemoEditor();
+  }
+  async function fetchAndRenderMemos() {
+    if (!currentMemoSymbol)
+      return;
+    try {
+      const response = await fetch(`/api/memos/${encodeURIComponent(currentMemoSymbol)}`);
+      if (!response.ok) {
+        throw new Error("\u30E1\u30E2\u306E\u8AAD\u307F\u8FBC\u307F\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002");
+      }
+      const memos = await response.json();
+      renderMemoList(memos);
+    } catch (error) {
+      console.error("Error fetching memos:", error);
+      memoList.innerHTML = "<li>\u30E1\u30E2\u306E\u8AAD\u307F\u8FBC\u307F\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002</li>";
+    }
+  }
+  function renderMemoList(memos) {
+    memoList.innerHTML = "";
+    if (!memos || memos.length === 0) {
+      memoList.innerHTML = "<li>\u307E\u3060\u30E1\u30E2\u306F\u3042\u308A\u307E\u305B\u3093\u3002</li>";
+      return;
+    }
+    memos.forEach((memo) => {
+      const li2 = document.createElement("li");
+      li2.className = "memo-item";
+      li2.dataset.memoId = memo.id;
+      li2.innerHTML = `
+            <div class="memo-content">${memo.content.replace(/\n/g, "<br>")}</div>
+            <div class="memo-meta">
+                <span class="memo-date">\u66F4\u65B0\u65E5\u6642: ${formatMemoDate(memo.updated_at || memo.created_at)}</span>
+                <div class="memo-actions">
+                    <button class="btn btn-secondary edit-memo-button">\u7DE8\u96C6</button>
+                    <button class="btn btn-danger delete-memo-button">\u524A\u9664</button>
+                </div>
+            </div>
+        `;
+      memoList.appendChild(li2);
+    });
+  }
+  async function handleSaveMemo() {
+    const content = memoTextarea.value.trim();
+    if (!content) {
+      alert("\u30E1\u30E2\u306E\u5185\u5BB9\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+      return;
+    }
+    const memoData = {
+      symbol: currentMemoSymbol,
+      content
+    };
+    try {
+      let response;
+      if (editingMemoId) {
+        response = await fetch(`/api/memos/${editingMemoId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content })
+        });
+      } else {
+        response = await fetch("/api/memos", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(memoData)
+        });
+      }
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: "\u4FDD\u5B58\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002" }));
+        throw new Error(error.error);
+      }
+      resetMemoEditor();
+      await fetchAndRenderMemos();
+    } catch (error) {
+      console.error("Error saving memo:", error);
+      alert(`\u30A8\u30E9\u30FC: ${error.message}`);
+    }
+  }
+  function handleMemoListClick(event) {
+    const target = event.target;
+    const memoItem = target.closest(".memo-item");
+    if (!memoItem)
+      return;
+    const memoId = memoItem.dataset.memoId;
+    if (target.classList.contains("delete-memo-button")) {
+      if (confirm("\u3053\u306E\u30E1\u30E2\u3092\u672C\u5F53\u306B\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F")) {
+        handleDeleteMemo(memoId);
+      }
+    } else if (target.classList.contains("edit-memo-button")) {
+      const contentDiv = memoItem.querySelector(".memo-content");
+      const content = contentDiv.innerHTML.replace(/<br>/g, "\n");
+      handleEditMemo(memoId, content);
+    }
+  }
+  async function handleDeleteMemo(memoId) {
+    try {
+      const response = await fetch(`/api/memos/${memoId}`, { method: "DELETE" });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: "\u524A\u9664\u306B\u5931\u6557\u3057\u307E\u3057\u305F\u3002" }));
+        throw new Error(error.error);
+      }
+      const itemToRemove = memoList.querySelector(`[data-memo-id='${memoId}']`);
+      if (itemToRemove) {
+        itemToRemove.remove();
+      }
+    } catch (error) {
+      console.error("Error deleting memo:", error);
+      alert(`\u30A8\u30E9\u30FC: ${error.message}`);
+    }
+  }
+  function handleEditMemo(memoId, content) {
+    editingMemoId = memoId;
+    memoTextarea.value = content;
+    saveMemoButton.textContent = "\u66F4\u65B0";
+    memoModalOverlay.querySelector(".modal-body").scrollTop = 0;
+    memoTextarea.focus();
   }
   var chartLayoutOptions = {
     layout: {
@@ -11881,19 +12035,17 @@
         const emailText = String(item?.email ?? "");
         const emailSpan = document.createElement("span");
         emailSpan.textContent = emailText;
-        li2.appendChild(emailSpan);
-        if (me2 && emailText.toLowerCase() === me2) {
-          const deleteButton = document.createElement("button");
-          deleteButton.type = "button";
-          deleteButton.textContent = "\u524A\u9664";
-          deleteButton.classList.add("delete-email-button");
-          deleteButton.addEventListener("click", async (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            await deleteEmail(emailText);
-          });
-          li2.appendChild(deleteButton);
-        }
+        emailList.appendChild(emailSpan);
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "\u524A\u9664";
+        deleteButton.classList.add("delete-email-button");
+        deleteButton.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          await deleteEmail(emailText);
+        });
+        li2.appendChild(deleteButton);
         emailList.appendChild(li2);
       });
     } catch (error) {
@@ -12118,6 +12270,8 @@
         registerButton.classList.add("hidden");
         logoutButton.classList.remove("hidden");
         xValueControls.classList.remove("hidden");
+        if (memoCard)
+          memoCard.classList.remove("hidden");
         if (emailAlertToggleContainer)
           emailAlertToggleContainer.classList.remove("hidden");
         if (emailAlertToggle) {
@@ -12151,6 +12305,8 @@
         registerButton.classList.remove("hidden");
         logoutButton.classList.add("hidden");
         xValueControls.classList.add("hidden");
+        if (memoCard)
+          memoCard.classList.add("hidden");
         connectSocket();
         start(currentDataType);
       }
@@ -12170,6 +12326,8 @@
       registerButton.classList.remove("hidden");
       logoutButton.classList.add("hidden");
       xValueControls.classList.add("hidden");
+      if (memoCard)
+        memoCard.classList.add("hidden");
       connectSocket();
       start(currentDataType);
     }
@@ -12188,6 +12346,8 @@
         currentUserXValues = {};
         currentUserCryptoXValues = {};
         xValueControls.classList.add("hidden");
+        if (memoCard)
+          memoCard.classList.add("hidden");
         if (emailAlertToggleContainer)
           emailAlertToggleContainer.classList.add("hidden");
         await checkAuthStatus();
@@ -12369,6 +12529,31 @@
     }
     updateTickerInputVisibility();
     await checkAuthStatus();
+    if (openMemoModalButton) {
+      openMemoModalButton.addEventListener("click", openMemoModal);
+    }
+    if (memoModalCloseButton) {
+      memoModalCloseButton.addEventListener("click", closeMemoModal);
+    }
+    if (memoModalOverlay) {
+      memoModalOverlay.addEventListener("click", (e2) => {
+        if (e2.target === memoModalOverlay) {
+          closeMemoModal();
+        }
+      });
+    }
+    if (saveMemoButton) {
+      saveMemoButton.addEventListener("click", handleSaveMemo);
+    }
+    if (cancelMemoButton) {
+      cancelMemoButton.addEventListener("click", () => {
+        resetMemoEditor();
+        closeMemoModal();
+      });
+    }
+    if (memoList) {
+      memoList.addEventListener("click", handleMemoListClick);
+    }
   });
 })();
 /*! Bundled license information:
