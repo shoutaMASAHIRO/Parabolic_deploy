@@ -926,8 +926,76 @@ function crossed(prevClose, curClose, prevLine, curLine) {
   return (wasBelow && isAbove) || (wasAbove && isBelow);
 }
 
-function eventObj(price, interval) {
-  return { price, interval, timestamp: nowIso() };
+// ✅ 追加：上抜け/下抜け（方向）を判定して保存する
+function crossDirection(prevClose, curClose, prevLine, curLine) {
+  if (![prevClose, curClose, prevLine, curLine].every((x) => Number.isFinite(x))) return null;
+  const wasBelow = prevClose < prevLine;
+  const isAbove = curClose >= curLine;
+  const wasAbove = prevClose > prevLine;
+  const isBelow = curClose <= curLine;
+  if (wasBelow && isAbove) return 'up'; // 下→上
+  if (wasAbove && isBelow) return 'down'; // 上→下
+  return null;
+}
+
+// ✅ 追加：indicator を人間向けに説明する（メール用）
+const BB_INDICATOR_INFO = {
+  upper2: { short: 'BB +2σ', long: 'ボリンジャーバンド +2σ（上側2σ）' },
+  upper1: { short: 'BB +1σ', long: 'ボリンジャーバンド +1σ（上側1σ）' },
+  middle: { short: 'BB 0σ', long: 'ボリンジャーバンド 0σ（中央線）' },
+  lower1: { short: 'BB -1σ', long: 'ボリンジャーバンド -1σ（下側1σ）' },
+  lower2: { short: 'BB -2σ', long: 'ボリンジャーバンド -2σ（下側2σ）' },
+};
+
+function indicatorInfo(indicatorKey) {
+  const key = String(indicatorKey || '');
+  if (BB_INDICATOR_INFO[key]) return BB_INDICATOR_INFO[key];
+
+  const m = /^ema(\d+)$/.exec(key);
+  if (m) {
+    const p = Number(m[1]);
+    return { short: `EMA(${p})`, long: `指数移動平均 EMA(${p})` };
+  }
+
+  return { short: key || 'unknown', long: key || 'unknown' };
+}
+
+function directionInfo(dir) {
+  if (dir === 'up') return { short: '上抜け', long: '上抜け（価格が線を下から上へクロス）' };
+  if (dir === 'down') return { short: '下抜け', long: '下抜け（価格が線を上から下へクロス）' };
+  return { short: '不明', long: '不明（古い履歴/判定不能）' };
+}
+
+function buildThresholdEmail({ symbol, interval, indicatorKey, ev, currentPrice, diff, threshold }) {
+  const ind = indicatorInfo(indicatorKey);
+  const dir = directionInfo(ev?.direction);
+  const iv = intervalInfo(interval);
+
+  const crossedAtStr = formatDateTimeMinuteJST(ev?.timestamp);
+
+  return {
+    subject: `${symbol} Alert - ${iv.short} - ${ind.short} ${dir.short}`,
+    text:
+      `${symbol} がしきい値に到達しました。\n\n` +
+      `【足の間隔】\n` +
+      `足間隔=${iv.long}\n\n` +
+      `【クロスした線】\n` +
+      `指標=${ind.long}\n` +
+      `方向=${dir.long}\n` +
+      `クロス時刻=${crossedAtStr}\n` +
+      `クロス時価格=${fmt3(ev?.price)}\n` +
+      `ライン値=${fmt3(ev?.lineValue)}\n\n` +
+      `【現在値】\n` +
+      `現在価格=${fmt3(currentPrice)}\n` +
+      `差分(|現在-クロス時|)=${fmt3(diff)}\n` +
+      `しきい値=${fmt3(threshold)}\n\n` +
+      `(内部キー: ${indicatorKey})`,
+  };
+}
+
+
+function eventObj(price, interval, extra = {}) {
+  return { price, interval, timestamp: nowIso(), ...extra };
 }
 
 // =====================
@@ -981,7 +1049,14 @@ async function processUsdJpyForUser(userId, settings) {
 
       for (const x of checks) {
         if (crossed(prevClose, curClose, x.prev, x.cur)) {
-          ivMap[x.key] = eventObj(curClose, iv);
+          const dir = crossDirection(prevClose, curClose, x.prev, x.cur);
+
+          // ✅ direction / lineValue を保存（メールで「上抜け/下抜け」「何の線か」を出すため）
+          ivMap[x.key] = eventObj(curClose, iv, {
+            direction: dir,
+            lineValue: x.cur,
+          });
+
           io.to(userRoom(userId)).emit('bb_cross', {
             bandName: x.key,
             interval: iv,
@@ -1011,7 +1086,14 @@ async function processUsdJpyForUser(userId, settings) {
 
       if (crossed(prevClose, curClose, prevE, curE)) {
         const key = `ema${p}`;
-        ivMap[key] = eventObj(curClose, iv);
+        const dir = crossDirection(prevClose, curClose, prevE, curE);
+
+        // ✅ direction / lineValue を保存
+        ivMap[key] = eventObj(curClose, iv, {
+          direction: dir,
+          lineValue: curE,
+        });
+
         io.to(userRoom(userId)).emit('ema_cross', {
           emaName: key,
           interval: iv,
@@ -1040,10 +1122,20 @@ async function processUsdJpyForUser(userId, settings) {
 
           const diff = Math.abs(curClose - ev.price);
           if (diff >= x) {
+            const mail = buildThresholdEmail({
+              symbol: 'USD/JPY',
+              interval: iv,
+              indicatorKey: name,
+              ev,
+              currentPrice: curClose,
+              diff,
+              threshold: x,
+            });
+
             await sendMail({
               to: recipients.join(','),
-              subject: `USD/JPY Alert (${iv})`,
-              text: `USD/JPY がしきい値に到達しました。\ninterval=${iv}\nindicator=${name}\ncrossPrice=${ev.price}\ncurrentPrice=${curClose}\ndiff=${diff}\nthreshold=${x}`,
+              subject: mail.subject,
+              text: mail.text,
             });
 
             // clear
@@ -1112,7 +1204,14 @@ async function processCryptoForUser(userId, settings) {
 
         for (const x of checks) {
           if (crossed(prevClose, curClose, x.prev, x.cur)) {
-            ivMap[x.key] = eventObj(curClose, iv);
+            const dir = crossDirection(prevClose, curClose, x.prev, x.cur);
+
+            // ✅ direction / lineValue を保存
+            ivMap[x.key] = eventObj(curClose, iv, {
+              direction: dir,
+              lineValue: x.cur,
+            });
+
             io.to(userRoom(userId)).emit('crypto_bb_cross', {
               ticker,
               bandName: x.key,
@@ -1143,7 +1242,14 @@ async function processCryptoForUser(userId, settings) {
 
         if (crossed(prevClose, curClose, prevE, curE)) {
           const key = `ema${p}`;
-          ivMap[key] = eventObj(curClose, iv);
+          const dir = crossDirection(prevClose, curClose, prevE, curE);
+
+          // ✅ direction / lineValue を保存
+          ivMap[key] = eventObj(curClose, iv, {
+            direction: dir,
+            lineValue: curE,
+          });
+
           io.to(userRoom(userId)).emit('crypto_ema_cross', {
             ticker,
             emaName: key,
@@ -1173,10 +1279,20 @@ async function processCryptoForUser(userId, settings) {
 
             const diff = Math.abs(curClose - ev.price);
             if (diff >= threshold) {
+              const mail = buildThresholdEmail({
+                symbol: ticker,
+                interval: iv,
+                indicatorKey: name,
+                ev,
+                currentPrice: curClose,
+                diff,
+                threshold,
+              });
+
               await sendMail({
                 to: recipients.join(','),
-                subject: `${ticker} Alert (${iv})`,
-                text: `${ticker} がしきい値に到達しました。\ninterval=${iv}\nindicator=${name}\ncrossPrice=${ev.price}\ncurrentPrice=${curClose}\ndiff=${diff}\nthreshold=${threshold}`,
+                subject: mail.subject,
+                text: mail.text,
               });
 
               ivMap[name] = null;
