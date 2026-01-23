@@ -11262,23 +11262,36 @@
   function renderMemoList(memos) {
     memoList.innerHTML = "";
     if (!memos || memos.length === 0) {
-      memoList.innerHTML = "<li>\u307E\u3060\u30E1\u30E2\u306F\u3042\u308A\u307E\u305B\u3093\u3002</li>";
+      memoList.innerHTML = '<li style="text-align: center; color: var(--text-secondary); background: transparent; border: none; padding: 16px;">\u307E\u3060\u30E1\u30E2\u306F\u3042\u308A\u307E\u305B\u3093\u3002</li>';
       return;
     }
     memos.forEach((memo) => {
       const li2 = document.createElement("li");
-      li2.className = "memo-item";
       li2.dataset.memoId = memo.id;
-      li2.innerHTML = `
-            <div class="memo-content">${memo.content.replace(/\n/g, "<br>")}</div>
-            <div class="memo-meta">
-                <span class="memo-date">\u66F4\u65B0\u65E5\u6642: ${formatMemoDate(memo.updated_at || memo.created_at)}</span>
-                <div class="memo-actions">
-                    <button class="btn btn-secondary edit-memo-button">\u7DE8\u96C6</button>
-                    <button class="btn btn-danger delete-memo-button">\u524A\u9664</button>
-                </div>
-            </div>
-        `;
+      const memoContentDiv = document.createElement("div");
+      memoContentDiv.className = "memo-content";
+      const contentParagraph = document.createElement("p");
+      contentParagraph.textContent = memo.content;
+      const dateSpan = document.createElement("span");
+      dateSpan.style.display = "block";
+      dateSpan.style.marginTop = "12px";
+      dateSpan.style.fontSize = "0.8rem";
+      dateSpan.style.color = "var(--text-secondary)";
+      dateSpan.textContent = `\u66F4\u65B0\u65E5\u6642: ${formatMemoDate(memo.updated_at || memo.created_at)}`;
+      memoContentDiv.appendChild(contentParagraph);
+      memoContentDiv.appendChild(dateSpan);
+      const memoActionsDiv = document.createElement("div");
+      memoActionsDiv.className = "memo-actions";
+      const editButton = document.createElement("button");
+      editButton.className = "edit-memo-button";
+      editButton.textContent = "\u7DE8\u96C6";
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "delete-memo-button";
+      deleteButton.textContent = "\u524A\u9664";
+      memoActionsDiv.appendChild(editButton);
+      memoActionsDiv.appendChild(deleteButton);
+      li2.appendChild(memoContentDiv);
+      li2.appendChild(memoActionsDiv);
       memoList.appendChild(li2);
     });
   }
@@ -11320,7 +11333,7 @@
   }
   function handleMemoListClick(event) {
     const target = event.target;
-    const memoItem = target.closest(".memo-item");
+    const memoItem = target.closest("li[data-memo-id]");
     if (!memoItem)
       return;
     const memoId = memoItem.dataset.memoId;
@@ -11329,8 +11342,8 @@
         handleDeleteMemo(memoId);
       }
     } else if (target.classList.contains("edit-memo-button")) {
-      const contentDiv = memoItem.querySelector(".memo-content");
-      const content = contentDiv.innerHTML.replace(/<br>/g, "\n");
+      const contentP = memoItem.querySelector(".memo-content p");
+      const content = contentP ? contentP.textContent : "";
       handleEditMemo(memoId, content);
     }
   }

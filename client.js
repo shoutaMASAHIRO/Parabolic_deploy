@@ -780,24 +780,47 @@ async function fetchAndRenderMemos() {
 function renderMemoList(memos) {
     memoList.innerHTML = '';
     if (!memos || memos.length === 0) {
-        memoList.innerHTML = '<li>まだメモはありません。</li>';
+        memoList.innerHTML = '<li style="text-align: center; color: var(--text-secondary); background: transparent; border: none; padding: 16px;">まだメモはありません。</li>';
         return;
     }
 
     memos.forEach(memo => {
         const li = document.createElement('li');
-        li.className = 'memo-item';
         li.dataset.memoId = memo.id;
-        li.innerHTML = `
-            <div class="memo-content">${memo.content.replace(/\n/g, '<br>')}</div>
-            <div class="memo-meta">
-                <span class="memo-date">更新日時: ${formatMemoDate(memo.updated_at || memo.created_at)}</span>
-                <div class="memo-actions">
-                    <button class="btn btn-secondary edit-memo-button">編集</button>
-                    <button class="btn btn-danger delete-memo-button">削除</button>
-                </div>
-            </div>
-        `;
+
+        const memoContentDiv = document.createElement('div');
+        memoContentDiv.className = 'memo-content';
+
+        const contentParagraph = document.createElement('p');
+        contentParagraph.textContent = memo.content;
+
+        const dateSpan = document.createElement('span');
+        dateSpan.style.display = 'block';
+        dateSpan.style.marginTop = '12px';
+        dateSpan.style.fontSize = '0.8rem';
+        dateSpan.style.color = 'var(--text-secondary)';
+        dateSpan.textContent = `更新日時: ${formatMemoDate(memo.updated_at || memo.created_at)}`;
+
+        memoContentDiv.appendChild(contentParagraph);
+        memoContentDiv.appendChild(dateSpan);
+
+        const memoActionsDiv = document.createElement('div');
+        memoActionsDiv.className = 'memo-actions';
+
+        const editButton = document.createElement('button');
+        editButton.className = 'edit-memo-button';
+        editButton.textContent = '編集';
+
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'delete-memo-button';
+        deleteButton.textContent = '削除';
+
+        memoActionsDiv.appendChild(editButton);
+        memoActionsDiv.appendChild(deleteButton);
+
+        li.appendChild(memoContentDiv);
+        li.appendChild(memoActionsDiv);
+
         memoList.appendChild(li);
     });
 }
@@ -848,7 +871,7 @@ async function handleSaveMemo() {
 
 function handleMemoListClick(event) {
     const target = event.target;
-    const memoItem = target.closest('.memo-item');
+    const memoItem = target.closest('li[data-memo-id]');
     if (!memoItem) return;
 
     const memoId = memoItem.dataset.memoId;
@@ -858,8 +881,8 @@ function handleMemoListClick(event) {
             handleDeleteMemo(memoId);
         }
     } else if (target.classList.contains('edit-memo-button')) {
-        const contentDiv = memoItem.querySelector('.memo-content');
-        const content = contentDiv.innerHTML.replace(/<br>/g, '\n');
+        const contentP = memoItem.querySelector('.memo-content p');
+        const content = contentP ? contentP.textContent : '';
         handleEditMemo(memoId, content);
     }
 }
