@@ -966,10 +966,71 @@ function directionInfo(dir) {
   return { short: '不明', long: '不明（古い履歴/判定不能）' };
 }
 
+// ✅ 修正：interval 用の表示情報（short/long を揃える）
+function getIntervalInfo(interval) {
+  const iv = String(interval || 'unknown');
+  const map = {
+    '1m': { short: '1m', long: '1分足' },
+    '5m': { short: '5m', long: '5分足' },
+    '15m': { short: '15m', long: '15分足' },
+    '30m': { short: '30m', long: '30分足' },
+    '1h': { short: '1h', long: '1時間足' },
+    '4h': { short: '4h', long: '4時間足' },
+    '8h': { short: '8h', long: '8時間足' },
+    '1d': { short: '1d', long: '日足' },
+    '1wk': { short: '1wk', long: '週足' },
+  };
+  return map[iv] || { short: iv, long: iv };
+}
+
+// ✅ 追加：JSTで「YYYY-MM-DD HH:mm」表示（inputはISO文字列/Date/秒/ミリ秒どれでもOK）
+function formatDateTimeMinuteJST(input) {
+  if (input == null) return 'unknown';
+
+  let d;
+  if (input instanceof Date) {
+    d = input;
+  } else if (typeof input === 'number') {
+    // 1e12未満なら「秒」とみなす（Unix秒）
+    d = new Date(input < 1e12 ? input * 1000 : input);
+  } else {
+    d = new Date(input); // ISO文字列など
+  }
+
+  if (!Number.isFinite(d.getTime())) return String(input);
+
+  const parts = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? '';
+  const y = get('year');
+  const mo = get('month');
+  const da = get('day');
+  const hh = get('hour');
+  const mm = get('minute');
+
+  return `${y}-${mo}-${da} ${hh}:${mm} JST`;
+}
+
+// ✅ 追加：数値を小数点以下3桁程度にフォーマットする
+function fmt3(n) {
+  if (!Number.isFinite(n)) return String(n);
+  // toFixed(3) で3桁に丸め、Number() で末尾の不要な0を消す
+  return Number(n.toFixed(3));
+}
+
+// ✅ 修正：intervalInfo() ではなく getIntervalInfo() を呼ぶ
 function buildThresholdEmail({ symbol, interval, indicatorKey, ev, currentPrice, diff, threshold }) {
   const ind = indicatorInfo(indicatorKey);
   const dir = directionInfo(ev?.direction);
-  const iv = intervalInfo(interval);
+  const iv = getIntervalInfo(interval);
 
   const crossedAtStr = formatDateTimeMinuteJST(ev?.timestamp);
 
@@ -993,7 +1054,6 @@ function buildThresholdEmail({ symbol, interval, indicatorKey, ev, currentPrice,
   };
 }
 
-
 function eventObj(price, interval, extra = {}) {
   return { price, interval, timestamp: nowIso(), ...extra };
 }
@@ -1002,312 +1062,279 @@ function eventObj(price, interval, extra = {}) {
 // Watchers (USDJPY + Crypto)
 // =====================
 async function processUsdJpyForUser(userId, settings) {
-  const iv = normalizeInterval(settings.currentInterval || '1d');
+  const rt = ensureRealTimeState(settings);
+
+  // 閾値が設定されているすべてのインターバルを取得
+  const intervalsToWatch = Object.keys(ensureObj(settings.x_values));
+  if (intervalsToWatch.length === 0) {
+    return; // 監視対象がなければ何もしない
+  }
 
   const bbEnabled = settings.areBollingerBandsVisible !== false;
   const emaEnabled = settings.areEmaVisible !== false;
   const emailEnabled = settings.emailAlertsEnabled !== false;
 
-  const rt = ensureRealTimeState(settings);
-  const crossHistory = rt.crossHistory;
-  const ivMap = ensureIntervalMap(crossHistory, iv);
+  // 取得した各インターバルに対してループ処理
+  for (const iv of intervalsToWatch) {
+    try {
+      const crossHistory = rt.crossHistory;
+      const ivMap = ensureIntervalMap(crossHistory, iv);
 
-  const candles = await getCandlesWithCache('USDJPY=X', iv);
-  if (!candles || candles.length < 30) return;
-
-  const closes = candles.map((c) => c.close);
-  const prevClose = closes[closes.length - 2];
-  const curClose = closes[closes.length - 1];
-
-  // price update (UIの現在値更新用)
-  io.to(userRoom(userId)).emit('usd_jpy_price_update', { price: curClose });
-
-  // ---- BB cross ----
-  const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
-  const bbStdDev = Number(settings.bbStdDev) || 2;
-
-  if (bbEnabled) {
-    const bb1 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: 1 });
-    const bb2 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: bbStdDev });
-
-    if (bb1.length >= 2 && bb2.length >= 2) {
-      const prevIdx = bb1.length - 2;
-      const curIdx = bb1.length - 1;
-
-      const prev1 = bb1[prevIdx];
-      const cur1 = bb1[curIdx];
-      const prev2 = bb2[prevIdx];
-      const cur2 = bb2[curIdx];
-
-      const checks = [
-        { key: 'upper2', prev: prev2.upper, cur: cur2.upper, label: '+2σ' },
-        { key: 'upper1', prev: prev1.upper, cur: cur1.upper, label: '+1σ' },
-        { key: 'middle', prev: prev1.middle, cur: cur1.middle, label: '0σ' },
-        { key: 'lower1', prev: prev1.lower, cur: cur1.lower, label: '-1σ' },
-        { key: 'lower2', prev: prev2.lower, cur: cur2.lower, label: '-2σ' },
-      ];
-
-      for (const x of checks) {
-        if (crossed(prevClose, curClose, x.prev, x.cur)) {
-          const dir = crossDirection(prevClose, curClose, x.prev, x.cur);
-
-          // ✅ direction / lineValue を保存（メールで「上抜け/下抜け」「何の線か」を出すため）
-          ivMap[x.key] = eventObj(curClose, iv, {
-            direction: dir,
-            lineValue: x.cur,
-          });
-
-          io.to(userRoom(userId)).emit('bb_cross', {
-            bandName: x.key,
-            interval: iv,
-            price: curClose,
-            timestamp: ivMap[x.key].timestamp,
-            message: `USD/JPY: 価格がBB ${x.label} をクロスしました (${iv})`,
-          });
-        }
+      const candles = await getCandlesWithCache('USDJPY=X', iv);
+      if (!candles || candles.length < 30) {
+        continue; // データが不十分なら次のインターバルへ
       }
-    }
-  }
 
-  // ---- EMA cross ----
-  const emaPeriods = [
-    parseInt(settings.ema1Period, 10) || 10,
-    parseInt(settings.ema2Period, 10) || 25,
-    parseInt(settings.ema3Period, 10) || 50,
-  ];
+      const closes = candles.map((c) => c.close);
+      const prevClose = closes[closes.length - 2];
+      const curClose = closes[closes.length - 1];
 
-  if (emaEnabled) {
-    for (const p of emaPeriods) {
-      const ema = EMA.calculate({ period: p, values: closes, exact: false });
-      if (ema.length < 2) continue;
-
-      const prevE = ema[ema.length - 2];
-      const curE = ema[ema.length - 1];
-
-      if (crossed(prevClose, curClose, prevE, curE)) {
-        const key = `ema${p}`;
-        const dir = crossDirection(prevClose, curClose, prevE, curE);
-
-        // ✅ direction / lineValue を保存
-        ivMap[key] = eventObj(curClose, iv, {
-          direction: dir,
-          lineValue: curE,
-        });
-
-        io.to(userRoom(userId)).emit('ema_cross', {
-          emaName: key,
-          interval: iv,
-          price: curClose,
-          timestamp: ivMap[key].timestamp,
-          message: `USD/JPY: 価格がEMA(${p})をクロスしました (${iv})`,
-        });
+      // price update (UIの現在値更新用) - 最初のインターバルでのみ実行（負荷軽減）
+      if (intervalsToWatch.indexOf(iv) === 0) {
+        io.to(userRoom(userId)).emit('usd_jpy_price_update', { price: curClose });
       }
-    }
-  }
 
-  // ---- Threshold email + clear (respect toggles) ----
-  if (emailEnabled) {
-    const x = normalizeXValue(settings.x_values?.[iv]);
-    if (x != null) {
-      // ✅ USDJPY 用は symbol='USDJPY=X' の購読先だけに送る（+ GLOBAL は同梱）
-      const recipients = await getRecipientsForSymbol(userId, 'USDJPY=X');
+      // ---- BB cross ----
+      if (bbEnabled) {
+        const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
+        const bbStdDev = Number(settings.bbStdDev) || 2;
+        const bb1 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: 1 });
+        const bb2 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: bbStdDev });
 
-      if (recipients.length > 0) {
-        for (const [name, ev] of Object.entries(ivMap || {})) {
-          if (!ev || typeof ev !== 'object' || !Number.isFinite(ev.price)) continue;
+        if (bb1.length >= 2 && bb2.length >= 2) {
+          const prevIdx = bb1.length - 2;
+          const curIdx = bb1.length - 1;
+          const checks = [
+            { key: 'upper2', prev: bb2[prevIdx].upper, cur: bb2[curIdx].upper, label: '+2σ' },
+            { key: 'upper1', prev: bb1[prevIdx].upper, cur: bb1[curIdx].upper, label: '+1σ' },
+            { key: 'middle', prev: bb1[prevIdx].middle, cur: bb1[curIdx].middle, label: '0σ' },
+            { key: 'lower1', prev: bb1[prevIdx].lower, cur: bb1[curIdx].lower, label: '-1σ' },
+            { key: 'lower2', prev: bb2[prevIdx].lower, cur: bb2[curIdx].lower, label: '-2σ' },
+          ];
 
-          const isEma = String(name).startsWith('ema');
-          if (isEma && !emaEnabled) continue;
-          if (!isEma && !bbEnabled) continue;
-
-          const diff = Math.abs(curClose - ev.price);
-          if (diff >= x) {
-            const mail = buildThresholdEmail({
-              symbol: 'USD/JPY',
-              interval: iv,
-              indicatorKey: name,
-              ev,
-              currentPrice: curClose,
-              diff,
-              threshold: x,
-            });
-
-            await sendMail({
-              to: recipients.join(','),
-              subject: mail.subject,
-              text: mail.text,
-            });
-
-            // clear
-            ivMap[name] = null;
-            io.to(userRoom(userId)).emit('cross_history_cleared', { indicatorName: name, interval: iv });
-          }
-        }
-      }
-    }
-  }
-
-  settings.realTimeState = rt;
-  await upsertUserSettings(userId, settings);
-}
-
-async function processCryptoForUser(userId, settings) {
-  const bbEnabled = settings.areBollingerBandsVisible !== false;
-  const emaEnabled = settings.areEmaVisible !== false;
-  const emailEnabled = settings.emailAlertsEnabled !== false;
-
-  const rt = ensureRealTimeState(settings);
-  const root = ensureCryptoPerTickerState(rt);
-
-  // 監視対象：crypto_x_values に載ってる ticker を優先。無ければ currentCryptoTicker
-  const cx = ensureObj(settings.crypto_x_values);
-  const tickers =
-    Object.keys(cx).length > 0 ? Object.keys(cx) : [settings.currentCryptoTicker || 'BTC-USD'];
-
-  const iv = normalizeInterval(settings.currentInterval || '1d');
-
-  for (const ticker of tickers) {
-    if (!ticker) continue;
-
-    if (!root[ticker] || typeof root[ticker] !== 'object') root[ticker] = {};
-    const byIv = root[ticker];
-    const ivMap = ensureIntervalMap(byIv, iv);
-
-    const candles = await getCandlesWithCache(ticker, iv);
-    if (!candles || candles.length < 30) continue;
-
-    const closes = candles.map((c) => c.close);
-    const prevClose = closes[closes.length - 2];
-    const curClose = closes[closes.length - 1];
-
-    // ---- BB cross ----
-    const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
-    const bbStdDev = Number(settings.bbStdDev) || 2;
-
-    if (bbEnabled) {
-      const bb1 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: 1 });
-      const bb2 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: bbStdDev });
-
-      if (bb1.length >= 2 && bb2.length >= 2) {
-        const prev1 = bb1[bb1.length - 2];
-        const cur1 = bb1[bb1.length - 1];
-        const prev2 = bb2[bb2.length - 2];
-        const cur2 = bb2[bb2.length - 1];
-
-        const checks = [
-          { key: 'upper2', prev: prev2.upper, cur: cur2.upper, label: '+2σ' },
-          { key: 'upper1', prev: prev1.upper, cur: cur1.upper, label: '+1σ' },
-          { key: 'middle', prev: prev1.middle, cur: cur1.middle, label: '0σ' },
-          { key: 'lower1', prev: prev1.lower, cur: cur1.lower, label: '-1σ' },
-          { key: 'lower2', prev: prev2.lower, cur: cur2.lower, label: '-2σ' },
-        ];
-
-        for (const x of checks) {
-          if (crossed(prevClose, curClose, x.prev, x.cur)) {
-            const dir = crossDirection(prevClose, curClose, x.prev, x.cur);
-
-            // ✅ direction / lineValue を保存
-            ivMap[x.key] = eventObj(curClose, iv, {
-              direction: dir,
-              lineValue: x.cur,
-            });
-
-            io.to(userRoom(userId)).emit('crypto_bb_cross', {
-              ticker,
-              bandName: x.key,
-              interval: iv,
-              price: curClose,
-              timestamp: ivMap[x.key].timestamp,
-              message: `${ticker}: 価格がBB ${x.label} をクロスしました (${iv})`,
-            });
-          }
-        }
-      }
-    }
-
-    // ---- EMA cross ----
-    const emaPeriods = [
-      parseInt(settings.ema1Period, 10) || 10,
-      parseInt(settings.ema2Period, 10) || 25,
-      parseInt(settings.ema3Period, 10) || 50,
-    ];
-
-    if (emaEnabled) {
-      for (const p of emaPeriods) {
-        const ema = EMA.calculate({ period: p, values: closes, exact: false });
-        if (ema.length < 2) continue;
-
-        const prevE = ema[ema.length - 2];
-        const curE = ema[ema.length - 1];
-
-        if (crossed(prevClose, curClose, prevE, curE)) {
-          const key = `ema${p}`;
-          const dir = crossDirection(prevClose, curClose, prevE, curE);
-
-          // ✅ direction / lineValue を保存
-          ivMap[key] = eventObj(curClose, iv, {
-            direction: dir,
-            lineValue: curE,
-          });
-
-          io.to(userRoom(userId)).emit('crypto_ema_cross', {
-            ticker,
-            emaName: key,
-            interval: iv,
-            price: curClose,
-            timestamp: ivMap[key].timestamp,
-            message: `${ticker}: 価格がEMA(${p})をクロスしました (${iv})`,
-          });
-        }
-      }
-    }
-
-    // ---- Threshold email + clear (respect toggles) ----
-    if (emailEnabled) {
-      const threshold = normalizeXValue(cx?.[ticker]?.[iv]);
-      if (threshold != null) {
-        // ✅ crypto 用は symbol=ticker の購読先だけに送る（+ GLOBAL は同梱）
-        const recipients = await getRecipientsForSymbol(userId, ticker);
-
-        if (recipients.length > 0) {
-          for (const [name, ev] of Object.entries(ivMap || {})) {
-            if (!ev || typeof ev !== 'object' || !Number.isFinite(ev.price)) continue;
-
-            const isEma = String(name).startsWith('ema');
-            if (isEma && !emaEnabled) continue;
-            if (!isEma && !bbEnabled) continue;
-
-            const diff = Math.abs(curClose - ev.price);
-            if (diff >= threshold) {
-              const mail = buildThresholdEmail({
-                symbol: ticker,
+          for (const x of checks) {
+            if (crossed(prevClose, curClose, x.prev, x.cur)) {
+              const dir = crossDirection(prevClose, curClose, x.prev, x.cur);
+              ivMap[x.key] = eventObj(curClose, iv, { direction: dir, lineValue: x.cur });
+              io.to(userRoom(userId)).emit('bb_cross', {
+                bandName: x.key,
                 interval: iv,
-                indicatorKey: name,
-                ev,
-                currentPrice: curClose,
-                diff,
-                threshold,
-              });
-
-              await sendMail({
-                to: recipients.join(','),
-                subject: mail.subject,
-                text: mail.text,
-              });
-
-              ivMap[name] = null;
-              io.to(userRoom(userId)).emit('crypto_cross_history_cleared', {
-                ticker,
-                interval: iv,
-                indicatorName: name,
+                price: curClose,
+                timestamp: ivMap[x.key].timestamp,
+                message: `USD/JPY: 価格がBB ${x.label} をクロスしました (${iv})`,
               });
             }
           }
         }
       }
+
+      // ---- EMA cross ----
+      if (emaEnabled) {
+        const emaPeriods = [
+          parseInt(settings.ema1Period, 10) || 10,
+          parseInt(settings.ema2Period, 10) || 25,
+          parseInt(settings.ema3Period, 10) || 50,
+        ];
+        for (const p of emaPeriods) {
+          const ema = EMA.calculate({ period: p, values: closes, exact: false });
+          if (ema.length < 2) continue;
+          const prevE = ema[ema.length - 2];
+          const curE = ema[ema.length - 1];
+          if (crossed(prevClose, curClose, prevE, curE)) {
+            const key = `ema${p}`;
+            const dir = crossDirection(prevClose, curClose, prevE, curE);
+            ivMap[key] = eventObj(curClose, iv, { direction: dir, lineValue: curE });
+            io.to(userRoom(userId)).emit('ema_cross', {
+              emaName: key,
+              interval: iv,
+              price: curClose,
+              timestamp: ivMap[key].timestamp,
+              message: `USD/JPY: 価格がEMA(${p})をクロスしました (${iv})`,
+            });
+          }
+        }
+      }
+
+      // ---- Threshold email + clear ----
+      if (emailEnabled) {
+        const x = normalizeXValue(settings.x_values?.[iv]);
+        if (x != null) {
+          const recipients = await getRecipientsForSymbol(userId, 'USDJPY=X');
+          if (recipients.length > 0) {
+            for (const [name, ev] of Object.entries(ivMap || {})) {
+              if (!ev || typeof ev !== 'object' || !Number.isFinite(ev.price) || ev.interval !== iv) continue;
+
+              const isEma = String(name).startsWith('ema');
+              if ((isEma && !emaEnabled) || (!isEma && !bbEnabled)) continue;
+
+              const diff = Math.abs(curClose - ev.price);
+              if (diff >= x) {
+                console.log(`[EMAIL SENT] User:${userId} for ${name}(${iv})`); // メール送信ログ
+                const mail = buildThresholdEmail({
+                  symbol: 'USD/JPY',
+                  interval: iv,
+                  indicatorKey: name,
+                  ev,
+                  currentPrice: curClose,
+                  diff,
+                  threshold: x,
+                });
+                await sendMail({ to: recipients.join(','), subject: mail.subject, text: mail.text });
+                ivMap[name] = null;
+                io.to(userRoom(userId)).emit('cross_history_cleared', { indicatorName: name, interval: iv });
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`[processUsdJpyForUser] Error during processing interval '${iv}' for user ${userId}:`, e);
     }
   }
 
+  // すべてのインターバルの処理が終わった後で、変更をDBに保存
+  settings.realTimeState = rt;
+  await upsertUserSettings(userId, settings);
+}
+
+async function processCryptoForUser(userId, settings) {
+  const rt = ensureRealTimeState(settings);
+  const root = ensureCryptoPerTickerState(rt);
+  const cx = ensureObj(settings.crypto_x_values);
+
+  const tickersToWatch = Object.keys(cx);
+  if (tickersToWatch.length === 0) {
+    return; // 監視対象がなければ何もしない
+  }
+
+  const bbEnabled = settings.areBollingerBandsVisible !== false;
+  const emaEnabled = settings.areEmaVisible !== false;
+  const emailEnabled = settings.emailAlertsEnabled !== false;
+
+  for (const ticker of tickersToWatch) {
+    const intervalsToWatch = Object.keys(ensureObj(cx[ticker]));
+    if (intervalsToWatch.length === 0) {
+      continue;
+    }
+
+    for (const iv of intervalsToWatch) {
+      try {
+        if (!root[ticker] || typeof root[ticker] !== 'object') root[ticker] = {};
+        const byIv = root[ticker];
+        const ivMap = ensureIntervalMap(byIv, iv);
+
+        const candles = await getCandlesWithCache(ticker, iv);
+        if (!candles || candles.length < 30) {
+          continue;
+        }
+
+        const closes = candles.map((c) => c.close);
+        const prevClose = closes[closes.length - 2];
+        const curClose = closes[closes.length - 1];
+
+        // ---- BB cross ----
+        if (bbEnabled) {
+          const bbPeriod = parseInt(settings.bbPeriod, 10) || 20;
+          const bbStdDev = Number(settings.bbStdDev) || 2;
+          const bb1 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: 1 });
+          const bb2 = BollingerBands.calculate({ period: bbPeriod, values: closes, stdDev: bbStdDev });
+
+          if (bb1.length >= 2 && bb2.length >= 2) {
+            const checks = [
+              { key: 'upper2', prev: bb2[bb1.length - 2].upper, cur: bb2[bb1.length - 1].upper, label: '+2σ' },
+              { key: 'upper1', prev: bb1[bb1.length - 2].upper, cur: bb1[bb1.length - 1].upper, label: '+1σ' },
+              { key: 'middle', prev: bb1[bb1.length - 2].middle, cur: bb1[bb1.length - 1].middle, label: '0σ' },
+              { key: 'lower1', prev: bb1[bb1.length - 2].lower, cur: bb1[bb1.length - 1].lower, label: '-1σ' },
+              { key: 'lower2', prev: bb2[bb1.length - 2].lower, cur: bb2[bb1.length - 1].lower, label: '-2σ' },
+            ];
+            for (const x of checks) {
+              if (crossed(prevClose, curClose, x.prev, x.cur)) {
+                const dir = crossDirection(prevClose, curClose, x.prev, x.cur);
+                ivMap[x.key] = eventObj(curClose, iv, { direction: dir, lineValue: x.cur });
+                io.to(userRoom(userId)).emit('crypto_bb_cross', {
+                  ticker,
+                  bandName: x.key,
+                  interval: iv,
+                  price: curClose,
+                  timestamp: ivMap[x.key].timestamp,
+                  message: `${ticker}: 価格がBB ${x.label} をクロスしました (${iv})`,
+                });
+              }
+            }
+          }
+        }
+
+        // ---- EMA cross ----
+        if (emaEnabled) {
+          const emaPeriods = [
+            parseInt(settings.ema1Period, 10) || 10,
+            parseInt(settings.ema2Period, 10) || 25,
+            parseInt(settings.ema3Period, 10) || 50,
+          ];
+          for (const p of emaPeriods) {
+            const ema = EMA.calculate({ period: p, values: closes, exact: false });
+            if (ema.length < 2) continue;
+            const prevE = ema[ema.length - 2];
+            const curE = ema[ema.length - 1];
+            if (crossed(prevClose, curClose, prevE, curE)) {
+              const key = `ema${p}`;
+              const dir = crossDirection(prevClose, curClose, prevE, curE);
+              ivMap[key] = eventObj(curClose, iv, { direction: dir, lineValue: curE });
+              io.to(userRoom(userId)).emit('crypto_ema_cross', {
+                ticker,
+                emaName: key,
+                interval: iv,
+                price: curClose,
+                timestamp: ivMap[key].timestamp,
+                message: `${ticker}: 価格がEMA(${p})をクロスしました (${iv})`,
+              });
+            }
+          }
+        }
+
+        // ---- Threshold email + clear ----
+        if (emailEnabled) {
+          const threshold = normalizeXValue(cx?.[ticker]?.[iv]);
+          if (threshold != null) {
+            const recipients = await getRecipientsForSymbol(userId, ticker);
+            if (recipients.length > 0) {
+              for (const [name, ev] of Object.entries(ivMap || {})) {
+                if (!ev || typeof ev !== 'object' || !Number.isFinite(ev.price) || ev.interval !== iv) continue;
+                
+                const isEma = String(name).startsWith('ema');
+                if ((isEma && !emaEnabled) || (!isEma && !bbEnabled)) continue;
+
+                const diff = Math.abs(curClose - ev.price);
+                if (diff >= threshold) {
+                  console.log(`[EMAIL SENT] User:${userId} for ${ticker} ${name}(${iv})`); // メール送信ログ
+                  const mail = buildThresholdEmail({
+                    symbol: ticker,
+                    interval: iv,
+                    indicatorKey: name,
+                    ev,
+                    currentPrice: curClose,
+                    diff,
+                    threshold,
+                  });
+                  await sendMail({ to: recipients.join(','), subject: mail.subject, text: mail.text });
+                  ivMap[name] = null;
+                  io.to(userRoom(userId)).emit('crypto_cross_history_cleared', {
+                    ticker,
+                    interval: iv,
+                    indicatorName: name,
+                  });
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[processCryptoForUser] Error processing ${ticker}/${iv} for user ${userId}:`, e);
+      }
+    }
+  }
+
+  // すべての処理が終わった後で、変更をDBに保存
   settings.realTimeState = rt;
   await upsertUserSettings(userId, settings);
 }
